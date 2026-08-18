@@ -7,6 +7,8 @@ export default function Settings() {
   const [saving, setSaving] = useState(false)
   const [saved, setSaved] = useState(false)
   const [err, setErr] = useState('')
+  const [resetingExpiry, setResetingExpiry] = useState(false)
+  const [expiryReset, setExpiryReset] = useState(false)
 
   useEffect(() => {
     api.settings.get().then(s => {
@@ -110,10 +112,33 @@ export default function Settings() {
           <span className={data.api_key_set ? 'text-green' : 'text-red'}>
             {data.api_key_set ? 'API key configured' : 'No API key set'}
           </span>
-          {data.api_key_set && (
+          {data.api_key_set && data.api_key_expires && (
             <span className="text-red font-mono ml-auto">⚠ Expires {data.api_key_expires} — regenerate before then</span>
           )}
+          {data.api_key_set && !data.api_key_expires && (
+            <span className="text-muted font-mono ml-auto">No expiry set — click Reset Expiry after adding keys</span>
+          )}
         </div>
+        {data.api_key_set && (
+          <div className="mt-3 flex items-center gap-3">
+            <p className="text-[11px] text-muted flex-1">After updating keys in <code className="badge-data">.env</code> on the VM, click here to set the new expiry to today + 90 days. You'll get a Telegram alert 1 day before it expires.</p>
+            <button
+              onClick={async () => {
+                setResetingExpiry(true); setExpiryReset(false)
+                try {
+                  const r = await fetch('/api/settings/reset-expiry', { method: 'POST', credentials: 'include' })
+                  const j = await r.json()
+                  setData(d => d ? { ...d, api_key_expires: j.expiry } : d)
+                  setExpiryReset(true)
+                } finally { setResetingExpiry(false) }
+              }}
+              disabled={resetingExpiry}
+              className="text-[11px] px-3 py-1.5 rounded border border-accent/50 text-accent hover:bg-accent/10 transition-colors disabled:opacity-40 whitespace-nowrap"
+            >
+              {resetingExpiry ? '…' : expiryReset ? '✓ Expiry Reset' : 'Key Renewed — Reset Expiry'}
+            </button>
+          </div>
+        )}
       </section>
 
       {/* Save bar */}

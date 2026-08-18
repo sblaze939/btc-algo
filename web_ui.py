@@ -33,6 +33,43 @@ except Exception:
 
 # ── Daily auto-sync task ───────────────────────────────────────────────────────
 
+def _send_telegram_alert(message: str):
+    """Send a message via the Telegram bot to the alert chat."""
+    token = _env_get("TELEGRAM_BOT_TOKEN")
+    chat  = _env_get("TELEGRAM_ALERT_CHAT_ID")
+    if not token or not chat:
+        return
+    import urllib.request
+    url  = f"https://api.telegram.org/bot{token}/sendMessage"
+    data = json.dumps({"chat_id": chat, "text": message, "parse_mode": "Markdown"}).encode()
+    try:
+        req = urllib.request.Request(url, data=data, headers={"Content-Type": "application/json"})
+        urllib.request.urlopen(req, timeout=10)
+    except Exception:
+        pass
+
+
+def _check_api_expiry():
+    """Alert via Telegram if master API key expires within 1 day."""
+    expiry_str = _env_get("COINSWITCH_API_EXPIRY")
+    if not expiry_str:
+        return
+    try:
+        expiry = date.fromisoformat(expiry_str)
+        days_left = (expiry - date.today()).days
+        if days_left <= 1:
+            msg = (
+                f"⚠️ *CoinSwitch API Key Expiry Alert*\n\n"
+                f"Your master API key expires on *{expiry_str}* "
+                f"({'today' if days_left <= 0 else 'tomorrow'}).\n\n"
+                f"Generate new keys at CoinSwitch DMA and update `.env` on the VM, "
+                f"then click *Reset Expiry* in Settings."
+            )
+            _send_telegram_alert(msg)
+    except ValueError:
+        pass
+
+
 async def _daily_sync():
     """Runs once on startup (after 30s), then every 24h. Caches portfolio snapshot."""
     await asyncio.sleep(30)
@@ -52,6 +89,10 @@ async def _daily_sync():
                     (BOT_DIR / "logs" / "portfolio_snapshot.json").write_text(
                         json.dumps(snap, indent=2)
                     )
+        except Exception:
+            pass
+        try:
+            _check_api_expiry()
         except Exception:
             pass
         await asyncio.sleep(86400)  # 24 hours
@@ -310,7 +351,7 @@ async def get_settings(_=Depends(auth)):
         "signal_mode": _env_get("SIGNAL_MODE") or "image",
         "alert_chat_id": _env_get("TELEGRAM_ALERT_CHAT_ID"),
         "api_key_set": bool(_env_get("COINSWITCH_API_KEY")),
-        "api_key_expires": "2026-11-16",
+        "api_key_expires": _env_get("COINSWITCH_API_EXPIRY") or None,
     }
 
 
@@ -331,6 +372,15 @@ async def save_settings(s: SettingsInput, _=Depends(auth)):
     if s.bot_token:
         _env_set("TELEGRAM_BOT_TOKEN", s.bot_token)
     return {"ok": True, "note": "Restart bot for changes to take effect"}
+
+
+@app.post("/api/settings/reset-expiry")
+async def reset_api_expiry(_=Depends(auth)):
+    """Call this after saving new CoinSwitch API keys — sets expiry to today + 90 days."""
+    from datetime import timedelta
+    expiry = (date.today() + timedelta(days=90)).isoformat()
+    _env_set("COINSWITCH_API_EXPIRY", expiry)
+    return {"ok": True, "expiry": expiry}
 
 
 # ── Portfolio / positions / journal ───────────────────────────────────────────
