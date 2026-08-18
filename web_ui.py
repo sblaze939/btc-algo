@@ -181,7 +181,7 @@ def _uptime() -> Optional[int]:
     if not log.exists():
         return None
     for line in reversed(log.read_text().splitlines()):
-        if "Starting BTC Options Bot" in line:
+        if "Starting BTC Options Algo" in line:
             try:
                 ts = datetime.strptime(line[1:20], "%Y-%m-%d %H:%M:%S")
                 return int((datetime.now() - ts).total_seconds())
@@ -218,21 +218,21 @@ async def bot_action(req: ActionReq, _=Depends(auth)):
 
     if req.action == "stop":
         subprocess.run("pkill -f 'python main.py'", shell=True)
-        _send_telegram_alert(f"🔴 *BTC Options Bot — Stopped*\nBot stopped via dashboard.\nMode was: {mode}")
+        _send_telegram_alert(f"🔴 *BTC Options Algo — Stopped*\nBot stopped via dashboard.\nMode was: {mode}")
         return {"ok": True}
 
     if req.action == "start":
         if _pid():
             return {"ok": False, "error": "Already running"}
         subprocess.Popen(start_cmd, shell=True, executable="/bin/bash")
-        _send_telegram_alert(f"🟢 *BTC Options Bot — Started*\nBot is now running.\nMode: *{mode}*")
+        _send_telegram_alert(f"🟢 *BTC Options Algo — Started*\nBot is now running.\nMode: *{mode}*")
         return {"ok": True}
 
     if req.action == "restart":
         subprocess.run("pkill -f 'python main.py'", shell=True)
         await asyncio.sleep(2)
         subprocess.Popen(start_cmd, shell=True, executable="/bin/bash")
-        _send_telegram_alert(f"🔄 *BTC Options Bot — Restarted*\nBot restarted via dashboard.\nMode: *{mode}*")
+        _send_telegram_alert(f"🔄 *BTC Options Algo — Restarted*\nBot restarted via dashboard.\nMode: *{mode}*")
         return {"ok": True}
 
     raise HTTPException(400, "Invalid action: use start | stop | restart")
