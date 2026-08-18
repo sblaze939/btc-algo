@@ -1,0 +1,56 @@
+@import url('https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@400;500;600;700&family=JetBrains+Mono:wght@400;600&display=swap');
+
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+* { box-sizing: border-box; }
+
+html, body, #root {
+  height: 100%;
+  margin: 0;
+  background: #0A0806;
+  color: #EDE4D2;
+  font-family: 'Space Grotesk', system-ui, sans-serif;
+  -webkit-font-smoothing: antialiased;
+}
+
+/* Scrollbar */
+::-webkit-scrollbar { width: 4px; height: 4px; }
+::-webkit-scrollbar-track { background: transparent; }
+::-webkit-scrollbar-thumb { background: #2A1E12; border-radius: 4px; }
+
+/* Remove number input spinners */
+input[type='number']::-webkit-inner-spin-button,
+input[type='number']::-webkit-outer-spin-button { -webkit-appearance: none; }
+
+/* Shared component classes */
+@layer components {
+  .input {
+    @apply w-full bg-bg border border-border text-tx placeholder-muted2 rounded-lg px-3 py-2.5 text-sm focus:outline-none focus:border-accent transition-colors;
+  }
+  .btn-accent {
+    @apply bg-accent text-bg font-bold rounded-lg px-4 py-2 text-sm transition-opacity hover:opacity-85 disabled:opacity-40 cursor-pointer;
+  }
+  .btn-ghost {
+    @apply bg-s2 border border-border2 text-tx font-semibold rounded-lg px-3 py-1.5 text-sm transition-colors hover:bg-s3 cursor-pointer;
+  }
+  /* Cards: surface depth via shadow + gold-tinted border highlight */
+  .card {
+    @apply bg-s1 border border-border rounded-card shadow-card;
+  }
+  /* Recessed log / terminal viewport */
+  .log-viewport {
+    background: #060402;
+    box-shadow: inset 0 1px 5px rgba(0,0,0,0.65);
+    @apply border border-border rounded-lg p-3 overflow-y-auto font-mono text-[12px] leading-relaxed;
+  }
+  /* System-state chip (DRY RUN / LIVE) — pill with heavier weight */
+  .chip-system {
+    @apply text-[11px] font-bold px-2.5 py-0.5 rounded-full border tracking-wider;
+  }
+  /* Data badge (multiplier, key preview) — inline monospace */
+  .badge-data {
+    @apply font-mono text-[11px] bg-s3 text-muted px-2 py-0.5 rounded border border-border;
+  }
+}
