@@ -1,0 +1,1 @@
+ubuntu ALL=(ALL) NOPASSWD: /bin/systemctl start kirafx-bot, /bin/systemctl stop kirafx-bot, /bin/systemctl restart kirafx-bot

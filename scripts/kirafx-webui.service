@@ -1,0 +1,18 @@
+[Unit]
+Description=KiraFX Algos Web UI
+After=network.target
+OnFailure=kirafx-webui-alert@%n.service
+
+[Service]
+Type=simple
+User=ubuntu
+WorkingDirectory=/home/ubuntu/btc-options-bot
+EnvironmentFile=/home/ubuntu/btc-options-bot/.env
+ExecStart=/home/ubuntu/btc-options-bot/venv/bin/python web_ui.py
+Restart=always
+RestartSec=10
+StandardOutput=append:/home/ubuntu/btc-options-bot/logs/web_ui.log
+StandardError=append:/home/ubuntu/btc-options-bot/logs/web_ui.log
+
+[Install]
+WantedBy=multi-user.target

@@ -208,8 +208,22 @@ class ActionReq(BaseModel):
     action: str  # start | stop | restart
 
 
+def _systemctl(action: str):
+    """Run systemctl command for kirafx-bot, falling back to pkill/nohup if systemd unavailable."""
+    r = subprocess.run(["sudo", "systemctl", action, "kirafx-bot"],
+                       capture_output=True, text=True)
+    return r.returncode == 0
+
+
+def _systemd_available() -> bool:
+    r = subprocess.run(["systemctl", "is-enabled", "kirafx-bot"],
+                       capture_output=True, text=True)
+    return r.returncode == 0
+
+
 @app.post("/api/bot/action")
 async def bot_action(req: ActionReq, _=Depends(auth)):
+    use_systemd = _systemd_available()
     venv = f"source {BOT_DIR}/venv/bin/activate"
     log_out = f"{BOT_DIR}/logs/trades.log"
     start_cmd = f"cd {BOT_DIR} && {venv} && nohup python main.py >> {log_out} 2>&1 &"
@@ -217,22 +231,31 @@ async def bot_action(req: ActionReq, _=Depends(auth)):
     mode = "DRY RUN" if _env_get("DRY_RUN").lower() == "true" else "LIVE TRADING"
 
     if req.action == "stop":
-        subprocess.run("pkill -f 'python main.py'", shell=True)
-        _send_telegram_alert(f"🔴 *BTC Options Algo — Stopped*\nBot stopped via dashboard.\nMode was: {mode}")
+        if use_systemd:
+            _systemctl("stop")
+        else:
+            subprocess.run("pkill -f 'python main.py'", shell=True)
+        _send_telegram_alert(f"🔴 *BTC Options Algo — Stopped*\nAlgo stopped via dashboard.\nMode was: {mode}")
         return {"ok": True}
 
     if req.action == "start":
         if _pid():
             return {"ok": False, "error": "Already running"}
-        subprocess.Popen(start_cmd, shell=True, executable="/bin/bash")
-        _send_telegram_alert(f"🟢 *BTC Options Algo — Started*\nBot is now running.\nMode: *{mode}*")
+        if use_systemd:
+            _systemctl("start")
+        else:
+            subprocess.Popen(start_cmd, shell=True, executable="/bin/bash")
+        _send_telegram_alert(f"🟢 *BTC Options Algo — Started*\nAlgo is now running.\nMode: *{mode}*")
         return {"ok": True}
 
     if req.action == "restart":
-        subprocess.run("pkill -f 'python main.py'", shell=True)
-        await asyncio.sleep(2)
-        subprocess.Popen(start_cmd, shell=True, executable="/bin/bash")
-        _send_telegram_alert(f"🔄 *BTC Options Algo — Restarted*\nBot restarted via dashboard.\nMode: *{mode}*")
+        if use_systemd:
+            _systemctl("restart")
+        else:
+            subprocess.run("pkill -f 'python main.py'", shell=True)
+            await asyncio.sleep(2)
+            subprocess.Popen(start_cmd, shell=True, executable="/bin/bash")
+        _send_telegram_alert(f"🔄 *BTC Options Algo — Restarted*\nAlgo restarted via dashboard.\nMode: *{mode}*")
         return {"ok": True}
 
     raise HTTPException(400, "Invalid action: use start | stop | restart")

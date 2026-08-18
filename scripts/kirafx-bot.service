@@ -1,0 +1,18 @@
+[Unit]
+Description=BTC Options Algo
+After=network.target
+OnFailure=kirafx-bot-alert@%n.service
+
+[Service]
+Type=simple
+User=ubuntu
+WorkingDirectory=/home/ubuntu/btc-options-bot
+EnvironmentFile=/home/ubuntu/btc-options-bot/.env
+ExecStart=/home/ubuntu/btc-options-bot/venv/bin/python main.py
+Restart=on-failure
+RestartSec=30
+StandardOutput=append:/home/ubuntu/btc-options-bot/logs/trades.log
+StandardError=append:/home/ubuntu/btc-options-bot/logs/trades.log
+
+[Install]
+WantedBy=multi-user.target

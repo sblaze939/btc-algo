@@ -1,0 +1,7 @@
+[Unit]
+Description=Crash alert for KiraFX Web UI
+
+[Service]
+Type=oneshot
+User=ubuntu
+ExecStart=/home/ubuntu/btc-options-bot/scripts/alert_crash.sh "KiraFX Web UI"

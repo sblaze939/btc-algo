@@ -1,0 +1,7 @@
+[Unit]
+Description=Crash alert for BTC Options Algo
+
+[Service]
+Type=oneshot
+User=ubuntu
+ExecStart=/home/ubuntu/btc-options-bot/scripts/alert_crash.sh "BTC Options Algo"
