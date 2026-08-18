@@ -55,12 +55,7 @@ function AccountModal({ account, onClose, onSave }: ModalProps) {
             <label className="text-[11px] text-muted font-semibold uppercase tracking-wider block mb-1">Name</label>
             <input className="input" value={form.name} onChange={e => setForm(f => ({ ...f, name: e.target.value }))} placeholder="Satvik, Dad, Friend…" />
           </div>
-          <div>
-            <label className="text-[11px] text-muted font-semibold uppercase tracking-wider block mb-1">Account Size (INR)</label>
-            <input className="input font-mono" type="number" value={form.account_size} onChange={e => setForm(f => ({ ...f, account_size: Number(e.target.value) }))} />
-          </div>
-
-          {/* Lot multiplier — computed or custom */}
+          {/* Lot multiplier — manual override only; auto-computed from live balance at runtime */}
           <div className="space-y-2">
             <div className="flex items-center justify-between">
               <label className="text-[11px] text-muted font-semibold uppercase tracking-wider">Lot Multiplier</label>
@@ -70,7 +65,7 @@ function AccountModal({ account, onClose, onSave }: ModalProps) {
                   checked={useCustomMult}
                   onChange={e => {
                     setUseCustomMult(e.target.checked)
-                    setForm(f => ({ ...f, lot_multiplier: e.target.checked ? parseFloat(mult) : null }))
+                    setForm(f => ({ ...f, lot_multiplier: e.target.checked ? 1 : null }))
                   }}
                   className="w-3 h-3"
                 />
@@ -88,8 +83,8 @@ function AccountModal({ account, onClose, onSave }: ModalProps) {
                 placeholder="e.g. 2.5"
               />
             ) : (
-              <div className="badge-data py-2 block text-center">
-                {mult}× computed from account size · mentor 5 lots → you get {exampleLots}
+              <div className="badge-data py-2 block text-center text-[11px]">
+                Auto — computed from live wallet balance ÷ ₹50,000 at runtime
               </div>
             )}
           </div>
@@ -227,10 +222,19 @@ export default function Accounts() {
   const [showModal, setShowModal] = useState(false)
   const [editTarget, setEditTarget] = useState<(Account & { idx: number }) | null>(null)
   const [expandedIdx, setExpandedIdx] = useState<number | null>(null)
+  const [liveBalances, setLiveBalances] = useState<Record<number, { equity: number; currency: string } | null>>({})
 
   async function load() {
     setLoading(true)
-    try { setAccounts(await api.accounts.list()) } finally { setLoading(false) }
+    try {
+      const accs = await api.accounts.list()
+      setAccounts(accs)
+      accs.forEach((_, idx) => {
+        api.accounts.detail(idx)
+          .then(d => setLiveBalances(b => ({ ...b, [idx]: { equity: d.wallet.equity, currency: d.wallet.currency } })))
+          .catch(() => setLiveBalances(b => ({ ...b, [idx]: null })))
+      })
+    } finally { setLoading(false) }
   }
 
   useEffect(() => { load() }, [])
@@ -272,7 +276,7 @@ export default function Accounts() {
             <table className="w-full text-sm">
               <thead>
                 <tr className="border-b border-border">
-                  {['Name', 'Size', 'Multiplier', 'API Key', 'Status', ''].map(h => (
+                  {['Name', 'Live Balance', 'Multiplier', 'API Key', 'Status', ''].map(h => (
                     <th key={h} className="text-left px-4 py-3 text-[10px] font-semibold text-muted uppercase tracking-widest whitespace-nowrap">{h}</th>
                   ))}
                 </tr>
@@ -282,11 +286,19 @@ export default function Accounts() {
                   <>
                     <tr key={i} className="border-b border-border last:border-0 hover:bg-s2/50 transition-colors">
                       <td className="px-4 py-3 font-semibold">{a.name}</td>
-                      <td className="px-4 py-3 font-mono text-[13px]">₹{a.account_size.toLocaleString('en-IN')}</td>
+                      <td className="px-4 py-3 font-mono text-[13px]">
+                        {liveBalances[i] === undefined
+                          ? <span className="text-muted">…</span>
+                          : liveBalances[i] === null
+                          ? <span className="text-muted">—</span>
+                          : `${liveBalances[i]!.currency === 'INR' ? '₹' : '$'}${liveBalances[i]!.equity.toLocaleString('en-IN', { maximumFractionDigits: 2 })}`}
+                      </td>
                       <td className="px-4 py-3">
                         <span className="badge-data">
                           {(a as any).lot_multiplier != null
                             ? `${(a as any).lot_multiplier}× (manual)`
+                            : liveBalances[i]
+                            ? `${(liveBalances[i]!.equity / MENTOR_BASE).toFixed(2)}×`
                             : `${multiplier(a.account_size)}×`}
                         </span>
                       </td>
@@ -327,7 +339,7 @@ export default function Accounts() {
       </div>
 
       <p className="text-muted2 text-[11px] mt-3 leading-relaxed">
-        Mentor baseline ₹50,000 = 1×. Multiplier = your size ÷ 50,000. Lots rounded to nearest whole number.
+        Mentor baseline ₹50,000 = 1×. Multiplier auto-computed from live wallet balance. Override per account if needed.
       </p>
 
       {showModal && (
