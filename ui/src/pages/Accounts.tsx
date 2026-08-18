@@ -1,10 +1,10 @@
 import { useState, useEffect } from 'react'
 import { api, Account, AccountInput, AccountDetail } from '../api'
 
-const MENTOR_BASE = 50000
+const BASE_SIZE = 50000
 
 function multiplier(size: number) {
-  return (size / MENTOR_BASE).toFixed(2)
+  return (size / BASE_SIZE).toFixed(2)
 }
 
 interface ModalProps {
@@ -27,8 +27,8 @@ function AccountModal({ account, onClose, onSave }: ModalProps) {
   const [saving, setSaving] = useState(false)
   const [err, setErr] = useState('')
 
-  const mult = (form.account_size / MENTOR_BASE).toFixed(2)
-  const exampleLots = Math.max(1, Math.round(5 * form.account_size / MENTOR_BASE))
+  const mult = (form.account_size / BASE_SIZE).toFixed(2)
+  const exampleLots = Math.max(1, Math.round(5 * form.account_size / BASE_SIZE))
 
   async function save() {
     if (!form.name.trim()) { setErr('Name is required'); return }
@@ -84,7 +84,7 @@ function AccountModal({ account, onClose, onSave }: ModalProps) {
               />
             ) : (
               <div className="badge-data py-2 block text-center text-[11px]">
-                Auto — computed from live wallet balance ÷ ₹50,000 at runtime
+                Auto — computed from live wallet balance ÷ ₹50,000
               </div>
             )}
           </div>
@@ -298,7 +298,7 @@ export default function Accounts() {
                           {(a as any).lot_multiplier != null
                             ? `${(a as any).lot_multiplier}× (manual)`
                             : liveBalances[i]
-                            ? `${(liveBalances[i]!.equity / MENTOR_BASE).toFixed(2)}×`
+                            ? `${(liveBalances[i]!.equity / BASE_SIZE).toFixed(2)}×`
                             : `${multiplier(a.account_size)}×`}
                         </span>
                       </td>
@@ -339,7 +339,7 @@ export default function Accounts() {
       </div>
 
       <p className="text-muted2 text-[11px] mt-3 leading-relaxed">
-        Mentor baseline ₹50,000 = 1×. Multiplier auto-computed from live wallet balance. Override per account if needed.
+        Base size ₹50,000 = 1×. Multiplier auto-computed from live wallet balance. Override per account if needed.
       </p>
 
       {showModal && (

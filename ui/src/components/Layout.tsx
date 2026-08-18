@@ -80,6 +80,12 @@ export default function Layout() {
             <Icon />
           </NavLink>
         ))}
+
+        <div className="mt-auto pb-1">
+          <div className="text-[8px] text-muted2 text-center leading-tight select-none" style={{ writingMode: 'vertical-rl', transform: 'rotate(180deg)' }}>
+            © {new Date().getFullYear()} KiraFX
+          </div>
+        </div>
       </aside>
 
       {/* ── Main ── */}

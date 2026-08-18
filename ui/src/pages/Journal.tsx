@@ -105,7 +105,7 @@ export default function Journal() {
                       <td className="px-4 py-2.5">{t.account}</td>
                       <td className="px-4 py-2.5 font-mono text-tx/90 text-[11px]">{t.symbol}</td>
                       <td className={`px-4 py-2.5 font-semibold ${t.side === 'Sell' ? 'text-red' : 'text-green'}`}>{t.side}</td>
-                      <td className="px-4 py-2.5 tabular-nums">{t.lots} <span className="text-muted">({t.mentor_lots} mentor)</span></td>
+                      <td className="px-4 py-2.5 tabular-nums">{t.lots} <span className="text-muted">({t.mentor_lots} base)</span></td>
                       <td className="px-4 py-2.5 font-mono tabular-nums">{parseFloat(t.price || '0').toFixed(2)}</td>
                       <td className="px-4 py-2.5 text-accent tabular-nums">{t.multiplier}×</td>
                     </tr>
