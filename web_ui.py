@@ -214,20 +214,25 @@ async def bot_action(req: ActionReq, _=Depends(auth)):
     log_out = f"{BOT_DIR}/logs/trades.log"
     start_cmd = f"cd {BOT_DIR} && {venv} && nohup python main.py >> {log_out} 2>&1 &"
 
+    mode = "DRY RUN" if _env_get("DRY_RUN").lower() == "true" else "LIVE TRADING"
+
     if req.action == "stop":
         subprocess.run("pkill -f 'python main.py'", shell=True)
+        _send_telegram_alert(f"🔴 *Bot Stopped*\nKiraFX Algos has been stopped via the dashboard.\nMode was: {mode}")
         return {"ok": True}
 
     if req.action == "start":
         if _pid():
             return {"ok": False, "error": "Already running"}
         subprocess.Popen(start_cmd, shell=True, executable="/bin/bash")
+        _send_telegram_alert(f"🟢 *Bot Started*\nKiraFX Algos is now running.\nMode: *{mode}*")
         return {"ok": True}
 
     if req.action == "restart":
         subprocess.run("pkill -f 'python main.py'", shell=True)
         await asyncio.sleep(2)
         subprocess.Popen(start_cmd, shell=True, executable="/bin/bash")
+        _send_telegram_alert(f"🔄 *Bot Restarted*\nKiraFX Algos has been restarted via the dashboard.\nMode: *{mode}*")
         return {"ok": True}
 
     raise HTTPException(400, "Invalid action: use start | stop | restart")
