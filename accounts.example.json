@@ -1,0 +1,18 @@
+[
+  {
+    "name": "Main",
+    "api_key": "",
+    "api_secret": "",
+    "account_size": 50000,
+    "active": true,
+    "note": "Leave api_key/api_secret blank to use the master keys from .env"
+  },
+  {
+    "name": "Secondary",
+    "api_key": "optional_own_key",
+    "api_secret": "optional_own_secret",
+    "account_size": 100000,
+    "lot_multiplier": null,
+    "active": false
+  }
+]
