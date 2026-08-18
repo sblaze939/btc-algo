@@ -149,16 +149,16 @@ export default function Dashboard() {
         <div className="card p-4">
           <div className="text-[10px] font-semibold text-muted uppercase tracking-widest mb-2.5">Wallet Equity</div>
           <div className="font-mono text-xl font-bold text-tx tabular-nums">
-            {wallet ? `$${wallet.equity.toFixed(2)}` : '—'}
+            {wallet ? `${wallet.currency === 'INR' ? '₹' : '$'}${wallet.equity.toLocaleString('en-IN', { maximumFractionDigits: 2 })}` : '—'}
           </div>
-          <div className="text-[11px] text-muted mt-1.5">USDT · master account</div>
+          <div className="text-[11px] text-muted mt-1.5">{wallet?.currency ?? 'INR'} · master account</div>
         </div>
         <div className="card p-4">
           <div className="text-[10px] font-semibold text-muted uppercase tracking-widest mb-2.5">Unrealised PnL</div>
           <div className={`font-mono text-xl font-bold tabular-nums ${
             !wallet ? 'text-tx' : wallet.unrealised_pnl >= 0 ? 'text-green-live' : 'text-red-live'
           }`}>
-            {wallet ? `${fmt(wallet.unrealised_pnl)} USDT` : '—'}
+            {wallet ? `${fmt(wallet.unrealised_pnl)} ${wallet.currency}` : '—'}
           </div>
           <div className="text-[11px] text-muted mt-1.5">Across open positions</div>
         </div>

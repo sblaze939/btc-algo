@@ -358,11 +358,17 @@ def _keys_for(acct: dict) -> tuple[str, str]:
 def _fetch_wallet(api_key: str, api_secret: str) -> dict:
     r = _cs_get("/v5/account/wallet-balance", {"accountType": "UNIFIED"}, api_key, api_secret)
     coins = r.get("result", {}).get("list", [{}])[0].get("coin", [])
-    usdt = next((c for c in coins if c.get("coin") == "USDT"), {})
+    # CoinSwitch DMA uses INR-denominated accounts; fall back to USDT if not found
+    coin = (
+        next((c for c in coins if c.get("coin") == "INR"), None)
+        or next((c for c in coins if c.get("coin") == "USDT"), None)
+        or (max(coins, key=lambda c: float(c.get("equity", 0))) if coins else {})
+    )
     return {
-        "equity":          float(usdt.get("equity", 0)),
-        "wallet_balance":  float(usdt.get("walletBalance", 0)),
-        "unrealised_pnl":  float(usdt.get("unrealisedPnl", 0)),
+        "currency":        coin.get("coin", "INR"),
+        "equity":          float(coin.get("equity", 0)),
+        "wallet_balance":  float(coin.get("walletBalance", 0)),
+        "unrealised_pnl":  float(coin.get("unrealisedPnl", 0)),
     }
 
 

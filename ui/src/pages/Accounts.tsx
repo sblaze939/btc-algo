@@ -162,9 +162,9 @@ function AccDetailPanel({ idx, onClose }: { idx: number; onClose: () => void }) 
             <>
               <div className="grid grid-cols-3 gap-3">
                 {[
-                  { label: 'Equity', value: `$${detail.wallet.equity.toFixed(2)}` },
-                  { label: 'Wallet Balance', value: `$${detail.wallet.wallet_balance.toFixed(2)}` },
-                  { label: 'Unrealised PnL', value: `${detail.wallet.unrealised_pnl >= 0 ? '+' : ''}${detail.wallet.unrealised_pnl.toFixed(4)} USDT`, color: detail.wallet.unrealised_pnl >= 0 ? 'text-green' : 'text-red' },
+                  { label: 'Equity', value: `${detail.wallet.currency === 'INR' ? '₹' : '$'}${detail.wallet.equity.toLocaleString('en-IN', { maximumFractionDigits: 2 })}` },
+                  { label: 'Wallet Balance', value: `${detail.wallet.currency === 'INR' ? '₹' : '$'}${detail.wallet.wallet_balance.toLocaleString('en-IN', { maximumFractionDigits: 2 })}` },
+                  { label: 'Unrealised PnL', value: `${detail.wallet.unrealised_pnl >= 0 ? '+' : ''}${detail.wallet.unrealised_pnl.toFixed(2)} ${detail.wallet.currency ?? 'INR'}`, color: detail.wallet.unrealised_pnl >= 0 ? 'text-green' : 'text-red' },
                 ].map(s => (
                   <div key={s.label} className="bg-s1 rounded-lg p-3">
                     <div className="text-[10px] text-muted uppercase tracking-wider mb-1">{s.label}</div>

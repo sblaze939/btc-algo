@@ -64,6 +64,7 @@ export interface SettingsInput {
 }
 
 export interface WalletBalance {
+  currency: string        // INR or USDT, as returned by CoinSwitch
   equity: number
   wallet_balance: number
   unrealised_pnl: number
