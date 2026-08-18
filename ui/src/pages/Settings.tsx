@@ -3,7 +3,7 @@ import { api, Settings as SettingsData, SettingsInput } from '../api'
 
 export default function Settings() {
   const [data, setData] = useState<SettingsData | null>(null)
-  const [form, setForm] = useState<SettingsInput>({ dry_run: true, live_from: '', signal_mode: 'image', alert_chat_id: '', bot_token: '' })
+  const [form, setForm] = useState<SettingsInput>({ dry_run: true, live_from: '', signal_mode: 'image', alert_chat_id: '', bot_token: '', cs_api_key: '', cs_api_secret: '' })
   const [saving, setSaving] = useState(false)
   const [saved, setSaved] = useState(false)
   const [err, setErr] = useState('')
@@ -13,7 +13,7 @@ export default function Settings() {
   useEffect(() => {
     api.settings.get().then(s => {
       setData(s)
-      setForm({ dry_run: s.dry_run, live_from: s.live_from, signal_mode: s.signal_mode, alert_chat_id: s.alert_chat_id, bot_token: '' })
+      setForm({ dry_run: s.dry_run, live_from: s.live_from, signal_mode: s.signal_mode, alert_chat_id: s.alert_chat_id, bot_token: '', cs_api_key: '', cs_api_secret: '' })
     })
   }, [])
 
@@ -104,10 +104,18 @@ export default function Settings() {
       </section>
 
       {/* Master API */}
-      <section className="bg-s1 border border-border rounded-card p-5">
+      <section className="bg-s1 border border-border rounded-card p-5 space-y-3">
         <h2 className="text-[10px] font-semibold text-muted uppercase tracking-widest mb-1">Master API Configuration</h2>
-        <p className="text-muted text-[12px] mb-3">Fallback used when an account has no personal API key. Managed via .env on the VM.</p>
-        <div className="flex items-center gap-2 text-[12px]">
+        <p className="text-muted text-[12px]">Fallback used when an account has no personal API key. Saving new keys auto-resets the 90-day expiry.</p>
+        <div>
+          <label className="text-[11px] text-muted font-semibold block mb-1">API Key <span className="font-normal">(leave blank to keep current)</span></label>
+          <input className="input font-mono text-xs" type="password" value={form.cs_api_key} onChange={e => setForm(f => ({ ...f, cs_api_key: e.target.value }))} placeholder={data.api_key_set ? '(unchanged)' : 'Enter CoinSwitch API key'} />
+        </div>
+        <div>
+          <label className="text-[11px] text-muted font-semibold block mb-1">API Secret <span className="font-normal">(leave blank to keep current)</span></label>
+          <input className="input font-mono text-xs" type="password" value={form.cs_api_secret} onChange={e => setForm(f => ({ ...f, cs_api_secret: e.target.value }))} placeholder={data.api_key_set ? '(unchanged)' : 'Enter CoinSwitch API secret'} />
+        </div>
+        <div className="flex items-center gap-2 text-[12px] pt-1">
           <div className={`w-2 h-2 rounded-full flex-shrink-0 ${data.api_key_set ? 'bg-green' : 'bg-red'}`} />
           <span className={data.api_key_set ? 'text-green' : 'text-red'}>
             {data.api_key_set ? 'API key configured' : 'No API key set'}
@@ -116,12 +124,12 @@ export default function Settings() {
             <span className="text-red font-mono ml-auto">⚠ Expires {data.api_key_expires} — regenerate before then</span>
           )}
           {data.api_key_set && !data.api_key_expires && (
-            <span className="text-muted font-mono ml-auto">No expiry set — click Reset Expiry after adding keys</span>
+            <span className="text-muted font-mono ml-auto">No expiry set — save new keys to set it</span>
           )}
         </div>
         {data.api_key_set && (
-          <div className="mt-3 flex items-center gap-3">
-            <p className="text-[11px] text-muted flex-1">After updating keys in <code className="badge-data">.env</code> on the VM, click here to set the new expiry to today + 90 days. You'll get a Telegram alert 1 day before it expires.</p>
+          <div className="flex items-center gap-3">
+            <p className="text-[11px] text-muted flex-1">Expiry auto-resets to today + 90 days when you save new keys. You can also reset it manually. Telegram alert fires 1 day before expiry.</p>
             <button
               onClick={async () => {
                 setResetingExpiry(true); setExpiryReset(false)

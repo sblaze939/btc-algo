@@ -61,6 +61,8 @@ export interface SettingsInput {
   signal_mode: string
   alert_chat_id: string
   bot_token: string
+  cs_api_key: string      // leave blank to keep current
+  cs_api_secret: string   // leave blank to keep current
 }
 
 export interface WalletBalance {

@@ -361,16 +361,26 @@ class SettingsInput(BaseModel):
     signal_mode: str
     alert_chat_id: str
     bot_token: str = ""
+    cs_api_key: str = ""
+    cs_api_secret: str = ""
 
 
 @app.post("/api/settings")
 async def save_settings(s: SettingsInput, _=Depends(auth)):
+    from datetime import timedelta
     _env_set("DRY_RUN", "true" if s.dry_run else "false")
     _env_set("LIVE_FROM", s.live_from)
     _env_set("SIGNAL_MODE", s.signal_mode)
     _env_set("TELEGRAM_ALERT_CHAT_ID", s.alert_chat_id)
     if s.bot_token:
         _env_set("TELEGRAM_BOT_TOKEN", s.bot_token)
+    if s.cs_api_key:
+        _env_set("COINSWITCH_API_KEY", s.cs_api_key)
+    if s.cs_api_secret:
+        _env_set("COINSWITCH_API_SECRET", s.cs_api_secret)
+    if s.cs_api_key or s.cs_api_secret:
+        # New keys saved — auto-reset expiry to today + 90 days
+        _env_set("COINSWITCH_API_EXPIRY", (date.today() + timedelta(days=90)).isoformat())
     return {"ok": True, "note": "Restart bot for changes to take effect"}
 
 
