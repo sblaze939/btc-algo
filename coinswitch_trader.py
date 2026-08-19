@@ -295,12 +295,12 @@ def get_positions_by_type(option_type: str, api_key: str = None, api_secret: str
             if p.get("symbol", "").endswith(suffix) and float(p.get("size", 0)) > 0]
 
 
-def get_position_lots_for_symbol(symbol: str, api_key: str = None, api_secret: str = None) -> int:
-    """Return open lot size for a specific symbol (0 if no position)."""
+def get_position_lots_for_symbol(symbol: str, api_key: str = None, api_secret: str = None) -> float:
+    """Return open position size (in BTC) for a specific symbol (0.0 if no position)."""
     for pos in get_open_positions(api_key, api_secret):
         if pos.get("symbol") == symbol:
-            return int(float(pos.get("size", 0)))
-    return 0
+            return float(pos.get("size", 0))
+    return 0.0
 
 
 def execute_close_all(option_type: str, api_key: str = None, api_secret: str = None,
@@ -313,7 +313,7 @@ def execute_close_all(option_type: str, api_key: str = None, api_secret: str = N
     count = 0
     for pos in positions:
         symbol = pos.get("symbol")
-        size   = int(float(pos.get("size", 0)))
+        size   = float(pos.get("size", 0))
         if size <= 0:
             continue
         log(f"Closing {size}x {symbol}", account_name)
@@ -449,13 +449,15 @@ def place_option_order(signal: dict,
 
     log(f"Mark={mark}  Bid={bid}  Ask={ask}  → Market order", account_name)
 
+    # CoinSwitch qty is in BTC (1 lot = 0.01 BTC)
+    qty_btc = round(lots * 0.01, 4)
     order_link_id = str(uuid.uuid4())
     body = {
         "category":    "option",
         "symbol":      symbol,
         "side":        side,
         "orderType":   "Market",
-        "qty":         str(lots),
+        "qty":         str(qty_btc),
         "timeInForce": "IOC",
         "orderLinkId": order_link_id,
     }
