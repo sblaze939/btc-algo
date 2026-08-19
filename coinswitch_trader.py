@@ -37,22 +37,12 @@ LOGS_DIR.mkdir(exist_ok=True)
 # Mentor baseline account size (INR). Your multiplier = your_account / MENTOR_BASE.
 MENTOR_BASE = 50_000
 
-DRY_RUN   = os.getenv("DRY_RUN", "false").strip().lower() == "true"
-LIVE_FROM = os.getenv("LIVE_FROM", "")  # YYYY-MM-DD; empty = no gate
+DRY_RUN = os.getenv("DRY_RUN", "false").strip().lower() == "true"
 
 
 def _is_live_trading_allowed() -> bool:
-    """Returns True only if DRY_RUN=false AND today >= LIVE_FROM."""
-    if DRY_RUN:
-        return False
-    if LIVE_FROM:
-        try:
-            gate = datetime.strptime(LIVE_FROM, "%Y-%m-%d").date()
-            if datetime.now(timezone.utc).date() < gate:
-                return False
-        except ValueError:
-            pass
-    return True
+    """Returns True only if DRY_RUN=false."""
+    return not DRY_RUN
 
 
 def log(msg: str, account: str = ""):
@@ -225,6 +215,170 @@ def get_ticker(symbol: str, api_key: str = None, api_secret: str = None) -> dict
     return items[0] if items else {}
 
 
+# ── Expiry helpers ────────────────────────────────────────────────────────────
+
+def _parse_symbol_expiry_date(symbol: str):
+    """Extract expiry as date from symbol like BTC-22AUG26-68000-C-USDT."""
+    from datetime import date as _date
+    MONTHS = {"JAN":1,"FEB":2,"MAR":3,"APR":4,"MAY":5,"JUN":6,"JUL":7,"AUG":8,"SEP":9,"OCT":10,"NOV":11,"DEC":12}
+    import re as _re
+    m = _re.match(r"BTC-(\d{2})([A-Z]{3})(\d{2})-", symbol)
+    if not m:
+        return None
+    day, mon, yr = m.groups()
+    mn = MONTHS.get(mon)
+    if not mn:
+        return None
+    try:
+        return _date(2000 + int(yr), mn, int(day))
+    except ValueError:
+        return None
+
+
+def _get_current_expiry_date():
+    """Read CURRENT_EXPIRY (or LIVE_FROM fallback) from .env file fresh each call."""
+    from datetime import date as _date
+    env_path = Path(__file__).parent / ".env"
+    val = ""
+    if env_path.exists():
+        for line in env_path.read_text().splitlines():
+            if line.startswith("CURRENT_EXPIRY="):
+                val = line.split("=", 1)[1].strip()
+                break
+        if not val:
+            for line in env_path.read_text().splitlines():
+                if line.startswith("LIVE_FROM="):
+                    val = line.split("=", 1)[1].strip()
+                    break
+    if not val:
+        val = os.getenv("CURRENT_EXPIRY") or os.getenv("LIVE_FROM", "")
+    if not val:
+        return None
+    try:
+        return datetime.strptime(val, "%Y-%m-%d").date()
+    except ValueError:
+        return None
+
+
+def _update_current_expiry(date_str: str):
+    """Write CURRENT_EXPIRY to .env and log."""
+    env_path = Path(__file__).parent / ".env"
+    lines = env_path.read_text().splitlines() if env_path.exists() else []
+    replaced = False
+    for i, ln in enumerate(lines):
+        if ln.startswith("CURRENT_EXPIRY="):
+            lines[i] = f"CURRENT_EXPIRY={date_str}"
+            replaced = True
+            break
+    if not replaced:
+        lines.append(f"CURRENT_EXPIRY={date_str}")
+    env_path.write_text("\n".join(lines) + "\n")
+    log(f"Current expiry auto-updated → {date_str}")
+
+
+# ── Position helpers ──────────────────────────────────────────────────────────
+
+def get_open_positions(api_key: str = None, api_secret: str = None) -> list:
+    """Fetch all open BTC options positions."""
+    try:
+        result = _get("/v5/position/list", {"category": "option", "settleCoin": "USDT"}, api_key, api_secret)
+        return result.get("result", {}).get("list", [])
+    except Exception as e:
+        log(f"ERROR fetching positions: {e}")
+        return []
+
+
+def get_positions_by_type(option_type: str, api_key: str = None, api_secret: str = None) -> list:
+    """Return all open positions for CE or PE with size > 0."""
+    suffix = "-C-USDT" if option_type.upper() in ("CE", "C") else "-P-USDT"
+    return [p for p in get_open_positions(api_key, api_secret)
+            if p.get("symbol", "").endswith(suffix) and float(p.get("size", 0)) > 0]
+
+
+def get_position_lots_for_symbol(symbol: str, api_key: str = None, api_secret: str = None) -> int:
+    """Return open lot size for a specific symbol (0 if no position)."""
+    for pos in get_open_positions(api_key, api_secret):
+        if pos.get("symbol") == symbol:
+            return int(float(pos.get("size", 0)))
+    return 0
+
+
+def execute_close_all(option_type: str, api_key: str = None, api_secret: str = None,
+                      multiplier: float = 1.0, account_name: str = "Main") -> int:
+    """Close all open positions of given type (CE or PE). Returns orders placed count."""
+    positions = get_positions_by_type(option_type, api_key, api_secret)
+    if not positions:
+        log(f"No open {option_type} positions to close", account_name)
+        return 0
+    count = 0
+    for pos in positions:
+        symbol = pos.get("symbol")
+        size   = int(float(pos.get("size", 0)))
+        if size <= 0:
+            continue
+        log(f"Closing {size}x {symbol}", account_name)
+        body = {
+            "category":    "option",
+            "symbol":      symbol,
+            "side":        "Buy",
+            "orderType":   "Market",
+            "qty":         str(size),
+            "timeInForce": "IOC",
+            "orderLinkId": str(uuid.uuid4()),
+        }
+        if not _is_live_trading_allowed():
+            log(f"[DRY RUN] Would close: {json.dumps(body)}", account_name)
+            count += 1
+            continue
+        try:
+            result = _post("/v5/order/create", body, api_key, api_secret)
+            if result.get("retCode") == 0:
+                log(f"Closed {symbol}: orderId={result['result']['orderId']}", account_name)
+                count += 1
+            else:
+                log(f"Failed to close {symbol}: {result.get('retMsg')}", account_name)
+        except Exception as e:
+            log(f"ERROR closing {symbol}: {e}", account_name)
+    return count
+
+
+def execute_full_exit(strike: int, option_type: str, expiry_hint: str = None,
+                      api_key: str = None, api_secret: str = None,
+                      multiplier: float = 1.0, account_name: str = "Main") -> bool:
+    """Exit the full open position for a specific strike."""
+    symbol = find_option_symbol(strike, option_type, expiry_hint, api_key, api_secret)
+    if not symbol:
+        return False
+    size = get_position_lots_for_symbol(symbol, api_key, api_secret)
+    if size <= 0:
+        log(f"No open position for {symbol} — skipping full exit", account_name)
+        return False
+    log(f"Full exit: {size}x {symbol}", account_name)
+    body = {
+        "category":    "option",
+        "symbol":      symbol,
+        "side":        "Buy",
+        "orderType":   "Market",
+        "qty":         str(size),
+        "timeInForce": "IOC",
+        "orderLinkId": str(uuid.uuid4()),
+    }
+    if not _is_live_trading_allowed():
+        log(f"[DRY RUN] Would full-exit: {json.dumps(body)}", account_name)
+        return True
+    try:
+        result = _post("/v5/order/create", body, api_key, api_secret)
+        if result.get("retCode") == 0:
+            log(f"Full exit placed: orderId={result['result']['orderId']}", account_name)
+            return True
+        else:
+            log(f"Full exit failed: {result.get('retMsg')}", account_name)
+            return False
+    except Exception as e:
+        log(f"ERROR full exit {symbol}: {e}", account_name)
+        return False
+
+
 # ── Order execution ───────────────────────────────────────────────────────────
 
 def place_option_order(signal: dict,
@@ -267,6 +421,17 @@ def place_option_order(signal: dict,
     if not symbol:
         return False
 
+    # ── Expiry gate ───────────────────────────────────────────────────────────
+    symbol_expiry  = _parse_symbol_expiry_date(symbol)
+    current_expiry = _get_current_expiry_date()
+    if symbol_expiry and current_expiry:
+        if symbol_expiry < current_expiry:
+            log(f"SKIP: Contract expiry {symbol_expiry} < current expiry {current_expiry} — old contract", account_name)
+            return False
+        elif symbol_expiry > current_expiry:
+            log(f"New expiry detected ({symbol_expiry}). Auto-updating current expiry.", account_name)
+            _update_current_expiry(symbol_expiry.isoformat())
+
     ticker = get_ticker(symbol, api_key, api_secret)
     if not ticker:
         log("ERROR: Ticker fetch failed", account_name)
@@ -282,24 +447,22 @@ def place_option_order(signal: dict,
         log(f"ERROR: Invalid price {price} for {symbol}", account_name)
         return False
 
-    log(f"Mark={mark}  Bid={bid}  Ask={ask}  → Order price={price}", account_name)
+    log(f"Mark={mark}  Bid={bid}  Ask={ask}  → Market order", account_name)
 
     order_link_id = str(uuid.uuid4())
     body = {
         "category":    "option",
         "symbol":      symbol,
         "side":        side,
-        "orderType":   "Limit",
+        "orderType":   "Market",
         "qty":         str(lots),
-        "price":       price,
-        "timeInForce": "GTC",
+        "timeInForce": "IOC",
         "orderLinkId": order_link_id,
     }
 
     # ── Dry-run / pre-live gate ───────────────────────────────────────────────
     if not _is_live_trading_allowed():
-        reason = f"DRY_RUN=true" if DRY_RUN else f"live trading starts {LIVE_FROM}"
-        log(f"[DRY RUN] Would place: {json.dumps(body, indent=2)}  ({reason})", account_name)
+        log(f"[DRY RUN] Would place: {json.dumps(body, indent=2)}", account_name)
         alert_dry_run(account_name, side, lots, symbol, str(price), raw_lots, multiplier)
         return True  # simulate success so caller logs it cleanly
 

@@ -10,7 +10,8 @@ from telethon.tl.types import MessageMediaPhoto, MessageMediaDocument
 from dotenv import load_dotenv
 
 from signal_parser import parse_signal, is_valid_signal, get_valid_signals
-from coinswitch_trader import place_option_order, log, MENTOR_BASE
+from coinswitch_trader import (place_option_order, execute_close_all,
+                                execute_full_exit, log, MENTOR_BASE)
 from alerts import (alert_signal_image, alert_signal_text, alert_no_signal,
                     alert_heartbeat, alert_error)
 
@@ -76,22 +77,38 @@ ACCOUNTS = load_accounts()
 # ── Signal handlers ───────────────────────────────────────────────────────────
 
 async def execute_signal_for_all_accounts(signal: dict):
-    """Place the same signal across all configured accounts."""
+    """Dispatch signal to all accounts — handles normal, full_exit, and close_all."""
     for acc in ACCOUNTS:
-        log(
-            f"Executing: {signal['action'].upper()} {signal['lots']}x "
-            f"{signal['strike']} {signal['option_type']} "
-            f"expiry={signal.get('expiry_date', '?')}",
-            acc["name"],
-        )
-        await asyncio.to_thread(
-            place_option_order,
-            signal,
-            acc["api_key"],
-            acc["api_secret"],
-            acc["multiplier"],
-            acc["name"],
-        )
+        if signal.get("close_all"):
+            log(f"Close all {signal['option_type']} positions", acc["name"])
+            await asyncio.to_thread(
+                execute_close_all,
+                signal["option_type"], acc["api_key"], acc["api_secret"],
+                acc["multiplier"], acc["name"],
+            )
+        elif signal.get("full_exit"):
+            log(
+                f"Full exit: {signal['strike']} {signal['option_type']} "
+                f"expiry={signal.get('expiry_date') or 'current'}",
+                acc["name"],
+            )
+            await asyncio.to_thread(
+                execute_full_exit,
+                signal["strike"], signal["option_type"], signal.get("expiry_date"),
+                acc["api_key"], acc["api_secret"], acc["multiplier"], acc["name"],
+            )
+        else:
+            log(
+                f"Executing: {signal['action'].upper()} {signal['lots']}x "
+                f"{signal['strike']} {signal['option_type']} "
+                f"expiry={signal.get('expiry_date', '?')}",
+                acc["name"],
+            )
+            await asyncio.to_thread(
+                place_option_order,
+                signal, acc["api_key"], acc["api_secret"],
+                acc["multiplier"], acc["name"],
+            )
 
 
 async def handle_new_message(event):
@@ -133,12 +150,12 @@ async def handle_new_message(event):
     # ── Text flow ─────────────────────────────────────────────────────────────
     if msg.text and SIGNAL_MODE in ("text", "both"):
         log(f"Text message: {msg.text[:200]}")
-        segments = re.split(r"\s+and\s+|&", msg.text, flags=re.IGNORECASE)
+        segments = re.split(r"\s+and\s+|[&\n]+|\bthen\b", msg.text, flags=re.IGNORECASE)
         first    = None
         valid    = []
         for segment in segments:
             parsed = parse_text_signal(segment.strip(), inherit=first)
-            if parsed and is_valid_signal(parsed):
+            if parsed and is_valid_text_signal(parsed):
                 if first is None:
                     first = parsed
                 valid.append(parsed)
@@ -162,38 +179,137 @@ async def handle_new_message(event):
 
 # ── Text-only fallback parser ─────────────────────────────────────────────────
 
+_MONTHS_MAP = {
+    "jan":"Jan","feb":"Feb","mar":"Mar","apr":"Apr","may":"May","jun":"Jun",
+    "jul":"Jul","aug":"Aug","sep":"Sep","oct":"Oct","nov":"Nov","dec":"Dec"
+}
+
+def _extract_expiry_from_text(text: str) -> str | None:
+    """Extract expiry hint from text: '21 aug', 'aug 7th', '7/aug', '21st aug', etc."""
+    t = text.lower()
+    for mon_key, mon_val in _MONTHS_MAP.items():
+        m = re.search(rf"(\d{{1,2}})(?:st|nd|rd|th)?\s*[-/]?\s*{mon_key}", t)
+        if m:
+            return f"{m.group(1)} {mon_val}"
+        m = re.search(rf"{mon_key}\s*[-/]?\s*(\d{{1,2}})(?:st|nd|rd|th)?", t)
+        if m:
+            return f"{m.group(1)} {mon_val}"
+    return None
+
+
+def _validate_friday_expiry(expiry_str: str) -> str | None:
+    """Return expiry_str only if it resolves to a Friday; otherwise log warning and return None."""
+    from datetime import date as _date
+    from coinswitch_trader import _parse_expiry
+    MONTHS = {"JAN":1,"FEB":2,"MAR":3,"APR":4,"MAY":5,"JUN":6,"JUL":7,"AUG":8,"SEP":9,"OCT":10,"NOV":11,"DEC":12}
+    bybit = _parse_expiry(expiry_str)
+    if not bybit:
+        return None
+    m = re.match(r"(\d{2})([A-Z]{3})(\d{2})", bybit)
+    if not m:
+        return None
+    day, mon, yr = m.groups()
+    mn = MONTHS.get(mon)
+    if not mn:
+        return None
+    try:
+        d = _date(2000 + int(yr), mn, int(day))
+    except ValueError:
+        return None
+    if d.weekday() == 4:
+        return expiry_str
+    log(f"WARNING: '{expiry_str}' is a {d.strftime('%A')}, not a Friday — ignoring date, using current expiry")
+    return None
+
+
+def is_valid_text_signal(signal: dict) -> bool:
+    if not signal:
+        return False
+    if signal.get("confidence") != "high":
+        return False
+    if signal.get("action") not in ("sell", "buy", "exit"):
+        return False
+    if not signal.get("option_type"):
+        return False
+    if signal.get("close_all"):
+        return True
+    if signal.get("full_exit"):
+        return signal.get("strike") is not None
+    return signal.get("strike") is not None and (signal.get("lots") or 0) > 0
+
+
 def parse_text_signal(text: str, inherit: dict = None) -> dict | None:
     """
-    Fallback for plain text: 'Sell 3 lots 58k PE', 'Exit 2 lots 68k CE', '69K CE'.
-    All keywords (sell/buy/exit/pe/ce/k) are case-insensitive.
-    `inherit` carries action/lots from a prior segment of the same message.
+    Parse a plain-text signal segment. Handles:
+    - 'Sell 3 lots 60k PE' → normal entry
+    - 'Exit 68k CE' / 'Buy 68k CE' → full exit (fetch from broker)
+    - 'Exit 68k CE full' / 'Fully exit 68k CE' → full exit
+    - 'Close all CE' / 'Exit all PE' → close every open CE/PE position
+    - 'close' is treated as 'exit'
+    - sell with no lots → warning + skip
     """
-    t            = text.lower()
-    action_match = re.search(r"\b(sell|buy|exit)\b", t)
-    lots_match   = re.search(r"(\d+)\s*lots?\b", t)
-    # Strike: prefer explicit "NNk" format; fall back to bare 5-digit number
-    strike_match = re.search(r"\b(\d+)\s*k\b", t) or re.search(r"\b(\d{5,})\b", t)
-    type_match   = re.search(r"\b(pe|ce)\b", t)
-
-    action = action_match.group(1) if action_match else (inherit or {}).get("action")
-    lots   = int(lots_match.group(1)) if lots_match else (inherit or {}).get("lots")
-
-    if not all([action, lots, type_match, strike_match]):
+    t = text.lower().strip()
+    if not t:
         return None
 
-    strike_raw = strike_match.group(1)
-    strike     = int(strike_raw) * 1000 if int(strike_raw) < 1000 else int(strike_raw)
+    # Action: sell | buy | exit | close (close → exit)
+    action_match = re.search(r"\b(sell|buy|exit|close)\b", t)
+    action_raw   = action_match.group(1) if action_match else None
+    action       = "exit" if action_raw == "close" else (action_raw or (inherit or {}).get("action"))
+    if not action:
+        return None
+
+    # Full exit keywords
+    is_full = bool(re.search(r"\b(full|fully|all|complete|completely)\b", t))
+
+    # Lots (explicit number only)
+    lots_match = re.search(r"(\d+)\s*lots?\b", t)
+    lots       = int(lots_match.group(1)) if lots_match else None
+    if lots is None and not is_full:
+        lots = (inherit or {}).get("lots")
+
+    # sell with no lots → skip
+    if action == "sell" and lots is None:
+        log(f"WARNING: Sell with no lot count — skipping: '{text}'")
+        return None
+
+    # Strike
+    strike_match = re.search(r"\b(\d+)\s*k\b", t) or re.search(r"\b(\d{5,})\b", t)
+
+    # Option type
+    type_match = re.search(r"\b(pe|ce)\b", t)
+    if not type_match:
+        return None
+
+    # close_all: buy/exit with type but no specific strike
+    close_all = (not strike_match) and action in ("buy", "exit")
+
+    # full_exit: buy/exit with no lots (or explicit full/all keywords)
+    full_exit = (not close_all) and action in ("buy", "exit") and (is_full or lots is None)
+
+    # Expiry: extract and validate as Friday
+    expiry_hint = _extract_expiry_from_text(t)
+    if expiry_hint:
+        expiry_hint = _validate_friday_expiry(expiry_hint)
+
+    strike = None
+    if strike_match:
+        sr     = strike_match.group(1)
+        strike = int(sr) * 1000 if int(sr) < 1000 else int(sr)
 
     return {
-        "action":      action,
-        "strike":      strike,
-        "option_type": type_match.group(1).upper(),
-        "lots":        lots,
-        "expiry_date": None,
-        "stop_loss":   None,
-        "target":      None,
-        "confidence":  "high",
-        "raw_text":    text,
+        "action":        action,
+        "strike":        strike,
+        "option_type":   type_match.group(1).upper(),
+        "lots":          lots,
+        "full_exit":     full_exit,
+        "close_all":     close_all,
+        "expiry_date":   expiry_hint,
+        "expiry_source": "explicit" if expiry_hint else "unknown",
+        "stop_loss":     None,
+        "target":        None,
+        "confidence":    "high",
+        "raw_text":      text,
     }
 
 
@@ -201,8 +317,8 @@ def parse_text_signal(text: str, inherit: dict = None) -> dict | None:
 
 async def heartbeat():
     """Log every 10 min; send Telegram alert every hour."""
-    from coinswitch_trader import DRY_RUN, LIVE_FROM
-    mode     = f"DRY RUN (live from {LIVE_FROM})" if DRY_RUN else "LIVE TRADING"
+    from coinswitch_trader import DRY_RUN
+    mode = "DRY RUN" if DRY_RUN else "LIVE TRADING"
     tick     = 0
     while True:
         await asyncio.sleep(600)
@@ -214,9 +330,9 @@ async def heartbeat():
 
 async def main():
     global client
-    from coinswitch_trader import DRY_RUN, LIVE_FROM
+    from coinswitch_trader import DRY_RUN
     log("Starting BTC Options Bot...")
-    mode = f"DRY RUN — live trading starts {LIVE_FROM}" if DRY_RUN else "LIVE TRADING ACTIVE"
+    mode = "DRY RUN" if DRY_RUN else "LIVE TRADING ACTIVE"
     log(f"Mode: {mode}")
     log(f"Accounts active: {[a['name'] for a in ACCOUNTS]}")
 

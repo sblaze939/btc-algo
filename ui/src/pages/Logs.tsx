@@ -34,6 +34,7 @@ export default function Logs() {
   const [lines, setLines] = useState<string[]>([])
   const [filter, setFilter] = useState<Filter>('all')
   const [autoScroll, setAutoScroll] = useState(true)
+  const [clearing, setClearing] = useState(false)
   const logRef = useRef<HTMLDivElement>(null)
 
   // Initial load
@@ -70,12 +71,26 @@ export default function Logs() {
           <h1 className="text-[17px] font-bold">Logs</h1>
           <p className="text-muted text-[12px] mt-0.5">trades.log · streaming live</p>
         </div>
-        <button
-          onClick={() => { setAutoScroll(true); logRef.current?.scrollTo(0, logRef.current.scrollHeight) }}
-          className="btn-ghost text-[12px]"
-        >
-          ↓ Latest
-        </button>
+        <div className="flex gap-2">
+          <button
+            onClick={async () => {
+              if (!confirm('Clear all logs?')) return
+              setClearing(true)
+              await fetch('/api/logs/clear', { method: 'POST', credentials: 'include' }).finally(() => setClearing(false))
+              setLines([])
+            }}
+            disabled={clearing}
+            className="btn-ghost text-[12px] text-red/70 hover:text-red disabled:opacity-40"
+          >
+            {clearing ? '…' : 'Clear'}
+          </button>
+          <button
+            onClick={() => { setAutoScroll(true); logRef.current?.scrollTo(0, logRef.current.scrollHeight) }}
+            className="btn-ghost text-[12px]"
+          >
+            ↓ Latest
+          </button>
+        </div>
       </div>
 
       {/* Filter chips */}

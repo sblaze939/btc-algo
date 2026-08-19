@@ -13,7 +13,7 @@ from datetime import datetime, date
 from pathlib import Path
 from typing import Optional
 
-from fastapi import Cookie, Depends, FastAPI, HTTPException, Response
+from fastapi import Cookie, Depends, FastAPI, File, HTTPException, Response, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
@@ -107,7 +107,7 @@ async def _lifespan(app):
     task.cancel()
 
 app = FastAPI(title="KiraFX Algos UI", lifespan=_lifespan)
-BOT_DIR = Path(__file__).parent
+BOT_DIR           = Path(__file__).parent
 UI_PASSWORD = os.getenv("UI_PASSWORD", "havenark2026")
 _SESSION = "kirafx_ok"
 
@@ -181,7 +181,7 @@ def _uptime() -> Optional[int]:
     if not log.exists():
         return None
     for line in reversed(log.read_text().splitlines()):
-        if "Starting BTC Options Algo" in line:
+        if "Starting BTC Options Bot" in line:
             try:
                 ts = datetime.strptime(line[1:20], "%Y-%m-%d %H:%M:%S")
                 return int((datetime.now() - ts).total_seconds())
@@ -291,6 +291,52 @@ async def log_stream(_=Depends(auth)):
                              headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"})
 
 
+@app.post("/api/logs/clear")
+async def clear_logs(_=Depends(auth)):
+    log = BOT_DIR / "logs" / "trades.log"
+    if log.exists():
+        log.write_text("")
+    return {"ok": True}
+
+
+# ── Logo ──────────────────────────────────────────────────────────────────────
+
+_LOGO_DIR = BOT_DIR / "static"
+_LOGO_EXTS = [".png", ".jpg", ".jpeg", ".webp", ".gif", ".svg"]
+
+
+def _logo_path() -> Optional[Path]:
+    for ext in _LOGO_EXTS:
+        p = _LOGO_DIR / f"logo{ext}"
+        if p.exists():
+            return p
+    return None
+
+
+@app.get("/api/logo")
+async def get_logo():
+    p = _logo_path()
+    if not p:
+        raise HTTPException(404, "No logo uploaded")
+    return FileResponse(p, headers={"Cache-Control": "no-cache"})
+
+
+@app.post("/api/logo")
+async def upload_logo(file: UploadFile = File(...), _=Depends(auth)):
+    _LOGO_DIR.mkdir(exist_ok=True)
+    ext = Path(file.filename or "logo.png").suffix.lower() or ".png"
+    if ext not in _LOGO_EXTS:
+        raise HTTPException(400, "Unsupported image type")
+    # Remove old logo files first
+    for old_ext in _LOGO_EXTS:
+        old = _LOGO_DIR / f"logo{old_ext}"
+        if old.exists():
+            old.unlink()
+    dest = _LOGO_DIR / f"logo{ext}"
+    dest.write_bytes(await file.read())
+    return {"ok": True}
+
+
 # ── Accounts ──────────────────────────────────────────────────────────────────
 
 ACCS = BOT_DIR / "accounts.json"
@@ -378,6 +424,8 @@ async def get_settings(_=Depends(auth)):
         "live_from": _env_get("LIVE_FROM"),
         "signal_mode": _env_get("SIGNAL_MODE") or "image",
         "alert_chat_id": _env_get("TELEGRAM_ALERT_CHAT_ID"),
+        "source_channel_id": _env_get("TELEGRAM_CHANNEL_ID"),
+        "current_expiry": _env_get("CURRENT_EXPIRY") or _env_get("LIVE_FROM"),
         "api_key_set": bool(_env_get("COINSWITCH_API_KEY")),
         "api_key_expires": _env_get("COINSWITCH_API_EXPIRY") or None,
     }
@@ -388,6 +436,8 @@ class SettingsInput(BaseModel):
     live_from: str
     signal_mode: str
     alert_chat_id: str
+    source_channel_id: str = ""
+    current_expiry: str = ""
     bot_token: str = ""
     cs_api_key: str = ""
     cs_api_secret: str = ""
@@ -400,6 +450,10 @@ async def save_settings(s: SettingsInput, _=Depends(auth)):
     _env_set("LIVE_FROM", s.live_from)
     _env_set("SIGNAL_MODE", s.signal_mode)
     _env_set("TELEGRAM_ALERT_CHAT_ID", s.alert_chat_id)
+    if s.source_channel_id:
+        _env_set("TELEGRAM_CHANNEL_ID", s.source_channel_id)
+    if s.current_expiry:
+        _env_set("CURRENT_EXPIRY", s.current_expiry)
     if s.bot_token:
         _env_set("TELEGRAM_BOT_TOKEN", s.bot_token)
     if s.cs_api_key:
@@ -410,6 +464,7 @@ async def save_settings(s: SettingsInput, _=Depends(auth)):
         # New keys saved — auto-reset expiry to today + 90 days
         _env_set("COINSWITCH_API_EXPIRY", (date.today() + timedelta(days=90)).isoformat())
     return {"ok": True, "note": "Restart bot for changes to take effect"}
+
 
 
 @app.post("/api/settings/reset-expiry")

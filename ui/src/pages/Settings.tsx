@@ -1,9 +1,58 @@
-import { useState, useEffect } from 'react'
+import { useRef, useState, useEffect } from 'react'
 import { api, Settings as SettingsData, SettingsInput } from '../api'
+
+function LogoUploader() {
+  const [hasLogo, setHasLogo] = useState<boolean | null>(null)
+  const [uploading, setUploading] = useState(false)
+  const [uploaded, setUploaded] = useState(false)
+  const inputRef = useRef<HTMLInputElement>(null)
+
+  async function handleFile(file: File) {
+    setUploading(true); setUploaded(false)
+    const fd = new FormData(); fd.append('file', file)
+    await fetch('/api/logo', { method: 'POST', credentials: 'include', body: fd })
+    setHasLogo(true); setUploading(false); setUploaded(true)
+    setTimeout(() => setUploaded(false), 3000)
+  }
+
+  return (
+    <section className="bg-s1 border border-border rounded-card p-5 space-y-3">
+      <h2 className="text-[10px] font-semibold text-muted uppercase tracking-widest">Brand Logo</h2>
+      <div className="flex items-center gap-4">
+        <div className="w-12 h-12 rounded-xl bg-gradient-to-br from-accent to-[#A07820] flex items-center justify-center font-bold text-bg overflow-hidden flex-shrink-0">
+          {hasLogo === false
+            ? 'KA'
+            : <img src={`/api/logo?t=${Date.now()}`} className="w-full h-full object-cover"
+                onLoad={() => setHasLogo(true)} onError={() => setHasLogo(false)} alt="logo" />
+          }
+        </div>
+        <div className="flex-1">
+          <p className="text-[12px] text-muted">PNG, JPG, SVG or WebP. Shown in sidebar and used as favicon.</p>
+          {uploaded && <p className="text-[12px] text-green mt-1">✓ Logo updated — reload to see favicon change</p>}
+        </div>
+        <input ref={inputRef} type="file" accept="image/*" className="hidden"
+          onChange={e => { const f = e.target.files?.[0]; if (f) handleFile(f) }} />
+        <button onClick={() => inputRef.current?.click()} disabled={uploading}
+          className="btn-accent text-[12px] disabled:opacity-40">
+          {uploading ? 'Uploading…' : 'Upload Logo'}
+        </button>
+      </div>
+    </section>
+  )
+}
 
 export default function Settings() {
   const [data, setData] = useState<SettingsData | null>(null)
-  const [form, setForm] = useState<SettingsInput>({ dry_run: true, live_from: '', signal_mode: 'image', alert_chat_id: '', bot_token: '', cs_api_key: '', cs_api_secret: '' })
+  const [form, setForm] = useState<SettingsInput>({
+    dry_run: true,
+    current_expiry: '',
+    signal_mode: 'image',
+    alert_chat_id: '',
+    source_channel_id: '',
+    bot_token: '',
+    cs_api_key: '',
+    cs_api_secret: '',
+  })
   const [saving, setSaving] = useState(false)
   const [saved, setSaved] = useState(false)
   const [err, setErr] = useState('')
@@ -13,7 +62,16 @@ export default function Settings() {
   useEffect(() => {
     api.settings.get().then(s => {
       setData(s)
-      setForm({ dry_run: s.dry_run, live_from: s.live_from, signal_mode: s.signal_mode, alert_chat_id: s.alert_chat_id, bot_token: '', cs_api_key: '', cs_api_secret: '' })
+      setForm({
+        dry_run: s.dry_run,
+        current_expiry: s.current_expiry,
+        signal_mode: s.signal_mode,
+        alert_chat_id: s.alert_chat_id,
+        source_channel_id: s.source_channel_id,
+        bot_token: '',
+        cs_api_key: '',
+        cs_api_secret: '',
+      })
     })
   }, [])
 
@@ -57,14 +115,14 @@ export default function Settings() {
 
         <div className="flex items-center justify-between">
           <div>
-            <div className="font-semibold text-sm">Live Trading From</div>
-            <div className="text-muted text-[12px] mt-0.5">Extra safety gate — no orders before this date even if DRY RUN is off</div>
+            <div className="font-semibold text-sm">Current Expiry</div>
+            <div className="text-muted text-[12px] mt-0.5">Starting expiry for signal filtering. Bot auto-updates this when signals for a new expiry arrive.</div>
           </div>
           <input
             type="date"
             className="input w-40"
-            value={form.live_from}
-            onChange={e => setForm(f => ({ ...f, live_from: e.target.value }))}
+            value={form.current_expiry}
+            onChange={e => setForm(f => ({ ...f, current_expiry: e.target.value }))}
           />
         </div>
       </section>
@@ -90,11 +148,15 @@ export default function Settings() {
         </p>
       </section>
 
-      {/* Telegram Alerts */}
+      {/* Telegram */}
       <section className="bg-s1 border border-border rounded-card p-5 space-y-3">
-        <h2 className="text-[10px] font-semibold text-muted uppercase tracking-widest">Telegram Alerts</h2>
+        <h2 className="text-[10px] font-semibold text-muted uppercase tracking-widest">Telegram</h2>
         <div>
-          <label className="text-[11px] text-muted font-semibold block mb-1">Alert Channel ID</label>
+          <label className="text-[11px] text-muted font-semibold block mb-1">Source Channel ID <span className="font-normal text-muted">(where signals come from)</span></label>
+          <input className="input font-mono text-xs" value={form.source_channel_id} onChange={e => setForm(f => ({ ...f, source_channel_id: e.target.value }))} placeholder="e.g. -100xxxxxxxxxx" />
+        </div>
+        <div>
+          <label className="text-[11px] text-muted font-semibold block mb-1">Alert Channel ID <span className="font-normal text-muted">(where bot sends alerts)</span></label>
           <input className="input font-mono text-xs" value={form.alert_chat_id} onChange={e => setForm(f => ({ ...f, alert_chat_id: e.target.value }))} />
         </div>
         <div>
@@ -148,6 +210,9 @@ export default function Settings() {
           </div>
         )}
       </section>
+
+      {/* Logo */}
+      <LogoUploader />
 
       {/* Save bar */}
       <div className="flex items-center justify-end gap-3 pt-1">

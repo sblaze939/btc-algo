@@ -4,6 +4,11 @@
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover" />
     <title>KiraFX Algos</title>
+    <link rel="icon" id="fav" href="/api/logo" type="image/png" />
+    <script>
+      // Silently fall back if no logo uploaded yet
+      document.getElementById('fav').onerror = function() { this.href = 'data:,' }
+    </script>
     <link rel="preconnect" href="https://fonts.googleapis.com" />
     <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap" />
   </head>

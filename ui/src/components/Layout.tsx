@@ -36,6 +36,19 @@ function mobileNavCls({ isActive }: { isActive: boolean }) {
   ].join(' ')
 }
 
+function LogoMark({ size = 'md' }: { size?: 'sm' | 'md' }) {
+  const [hasLogo, setHasLogo] = useState<boolean | null>(null)
+  const dim = size === 'sm' ? 'w-8 h-8 text-xs rounded-lg' : 'w-10 h-10 text-sm rounded-[10px]'
+  return (
+    <div className={`${dim} bg-gradient-to-br from-accent to-[#A07820] flex items-center justify-center font-bold text-bg mb-3 shadow-[0_4px_14px_rgba(212,168,67,0.25)] overflow-hidden flex-shrink-0`}>
+      {hasLogo === false
+        ? 'KA'
+        : <img src={`/api/logo?t=${Math.floor(Date.now()/60000)}`} className="w-full h-full object-cover" onLoad={() => setHasLogo(true)} onError={() => setHasLogo(false)} alt="logo" />
+      }
+    </div>
+  )
+}
+
 export default function Layout() {
   const navigate = useNavigate()
   const [status, setStatus] = useState<BotStatus | null>(null)
@@ -71,9 +84,7 @@ export default function Layout() {
       {/* ── Sidebar (desktop) ── */}
       <aside className="hidden sm:flex flex-col items-center w-16 bg-s1 border-r border-border py-4 gap-1 flex-shrink-0">
         {/* Logo */}
-        <div className="w-10 h-10 rounded-[10px] bg-gradient-to-br from-accent to-[#A07820] flex items-center justify-center font-bold text-sm text-bg mb-3 shadow-[0_4px_14px_rgba(212,168,67,0.25)]">
-          KA
-        </div>
+        <LogoMark />
 
         {NAV.map(({ to, label, Icon }) => (
           <NavLink key={to} to={to} className={navCls} title={label}>

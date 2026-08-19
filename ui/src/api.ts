@@ -48,18 +48,20 @@ export interface AccountInput {
 
 export interface Settings {
   dry_run: boolean
-  live_from: string
+  current_expiry: string
   signal_mode: string
   alert_chat_id: string
+  source_channel_id: string
   api_key_set: boolean
   api_key_expires: string
 }
 
 export interface SettingsInput {
   dry_run: boolean
-  live_from: string
+  current_expiry: string
   signal_mode: string
   alert_chat_id: string
+  source_channel_id: string
   bot_token: string
   cs_api_key: string      // leave blank to keep current
   cs_api_secret: string   // leave blank to keep current
