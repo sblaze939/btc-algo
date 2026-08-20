@@ -122,12 +122,23 @@ export default function Settings() {
             <div className="font-semibold text-sm">Live From</div>
             <div className="text-muted text-[12px] mt-0.5">Bot won't place real orders before this date even if Dry Run is off.</div>
           </div>
-          <input
-            type="date"
-            className="input w-40"
-            value={form.live_from}
-            onChange={e => setForm(f => ({ ...f, live_from: e.target.value }))}
-          />
+          <div className="flex items-center gap-2">
+            <input
+              type="date"
+              className="input w-40"
+              value={form.live_from}
+              onChange={e => setForm(f => ({ ...f, live_from: e.target.value }))}
+            />
+            {form.live_from && (
+              <button
+                onClick={() => setForm(f => ({ ...f, live_from: '' }))}
+                className="text-[11px] px-2 py-1.5 rounded border border-border text-muted hover:text-red hover:border-red/40 transition-colors"
+                title="Clear date"
+              >
+                ✕
+              </button>
+            )}
+          </div>
         </div>
 
         <div className="flex items-center justify-between">
