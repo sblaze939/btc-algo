@@ -387,10 +387,17 @@ async def update_account(idx: int, a: AccInput, _=Depends(auth)):
     if not (0 <= idx < len(accs)):
         raise HTTPException(404, "Not found")
     updated = a.model_dump()
-    if not updated["api_key"]:
-        updated["api_key"] = accs[idx].get("api_key", "")
-    if not updated["api_secret"]:
-        updated["api_secret"] = accs[idx].get("api_secret", "")
+    is_master = accs[idx].get("is_master", False)
+    updated["is_master"] = is_master
+    if is_master:
+        # Master account keys are managed exclusively through Settings
+        updated["api_key"]    = ""
+        updated["api_secret"] = ""
+    else:
+        if not updated["api_key"]:
+            updated["api_key"] = accs[idx].get("api_key", "")
+        if not updated["api_secret"]:
+            updated["api_secret"] = accs[idx].get("api_secret", "")
     accs[idx] = updated
     _write_accs(accs)
     return {"ok": True}
@@ -411,9 +418,36 @@ async def set_master(idx: int, _=Depends(auth)):
     accs = _read_accs()
     if not (0 <= idx < len(accs)):
         raise HTTPException(404, "Not found")
+
     previous = next((a["name"] for a in accs if a.get("is_master")), None)
+    old_master_idx = next((i for i, a in enumerate(accs) if a.get("is_master")), None)
+
+    # Current .env keys (belong to current master)
+    env_key    = _env_get("COINSWITCH_API_KEY")
+    env_secret = _env_get("COINSWITCH_API_SECRET")
+
+    # New master's personal key (if any) moves to .env
+    new_key    = accs[idx].get("api_key", "")
+    new_secret = accs[idx].get("api_secret", "")
+
+    # Give old master its .env key as a personal key so it keeps working
+    if old_master_idx is not None and old_master_idx != idx and env_key:
+        accs[old_master_idx]["api_key"]    = env_key
+        accs[old_master_idx]["api_secret"] = env_secret
+
+    # Promote new master's personal key to .env
+    if new_key:
+        _env_set("COINSWITCH_API_KEY", new_key)
+    if new_secret:
+        _env_set("COINSWITCH_API_SECRET", new_secret)
+
+    # Clear new master's personal key — it uses .env from now on
+    accs[idx]["api_key"]    = ""
+    accs[idx]["api_secret"] = ""
+
     for i, a in enumerate(accs):
         a["is_master"] = (i == idx)
+
     _write_accs(accs)
     return {"ok": True, "previous_master": previous}
 

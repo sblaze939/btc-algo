@@ -89,16 +89,25 @@ function AccountModal({ account, onClose, onSave }: ModalProps) {
             )}
           </div>
 
-          <div>
-            <label className="text-[11px] text-muted font-semibold uppercase tracking-wider block mb-1">
-              API Key {isEdit && <span className="normal-case font-normal">(leave blank to keep existing)</span>}
-            </label>
-            <input className="input font-mono text-xs" value={form.api_key} onChange={e => setForm(f => ({ ...f, api_key: e.target.value }))} placeholder={isEdit ? '(unchanged)' : 'Optional — blank = master key'} />
-          </div>
-          <div>
-            <label className="text-[11px] text-muted font-semibold uppercase tracking-wider block mb-1">API Secret</label>
-            <input className="input font-mono text-xs" type="password" value={form.api_secret} onChange={e => setForm(f => ({ ...f, api_secret: e.target.value }))} placeholder={isEdit ? '(unchanged)' : 'Optional'} />
-          </div>
+          {account?.is_master ? (
+            <div className="rounded-lg border border-border bg-bg px-4 py-3 text-[12px] text-muted leading-relaxed">
+              API credentials for the master account are managed in{' '}
+              <span className="text-tx font-semibold">Settings → Master API Configuration</span>.
+            </div>
+          ) : (
+            <>
+              <div>
+                <label className="text-[11px] text-muted font-semibold uppercase tracking-wider block mb-1">
+                  API Key {isEdit && <span className="normal-case font-normal">(leave blank to keep existing)</span>}
+                </label>
+                <input className="input font-mono text-xs" value={form.api_key} onChange={e => setForm(f => ({ ...f, api_key: e.target.value }))} placeholder={isEdit ? '(unchanged)' : 'Optional — blank = master key'} />
+              </div>
+              <div>
+                <label className="text-[11px] text-muted font-semibold uppercase tracking-wider block mb-1">API Secret</label>
+                <input className="input font-mono text-xs" type="password" value={form.api_secret} onChange={e => setForm(f => ({ ...f, api_secret: e.target.value }))} placeholder={isEdit ? '(unchanged)' : 'Optional'} />
+              </div>
+            </>
+          )}
 
           <div className="flex items-center justify-between py-1">
             <span className="text-sm font-semibold">Active</span>
