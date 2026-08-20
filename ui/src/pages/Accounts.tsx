@@ -216,6 +216,12 @@ function AccDetailPanel({ idx, onClose }: { idx: number; onClose: () => void }) 
   )
 }
 
+interface MasterConfirmState {
+  pendingIdx: number
+  pendingName: string
+  currentMaster: string
+}
+
 export default function Accounts() {
   const [accounts, setAccounts] = useState<Account[]>([])
   const [loading, setLoading] = useState(true)
@@ -223,6 +229,9 @@ export default function Accounts() {
   const [editTarget, setEditTarget] = useState<(Account & { idx: number }) | null>(null)
   const [expandedIdx, setExpandedIdx] = useState<number | null>(null)
   const [liveBalances, setLiveBalances] = useState<Record<number, { equity: number; currency: string } | null>>({})
+  const [masterConfirm, setMasterConfirm] = useState<MasterConfirmState | null>(null)
+  const [settingMaster, setSettingMaster] = useState<number | null>(null)
+  const [deleteConfirm, setDeleteConfirm] = useState<{ idx: number; name: string } | null>(null)
 
   async function load() {
     setLoading(true)
@@ -245,13 +254,39 @@ export default function Accounts() {
   }
 
   async function del(idx: number, name: string) {
-    if (!confirm(`Remove "${name}"? This cannot be undone.`)) return
+    setDeleteConfirm({ idx, name })
+  }
+
+  async function confirmDelete() {
+    if (!deleteConfirm) return
+    const { idx } = deleteConfirm
+    setDeleteConfirm(null)
     await api.accounts.delete(idx)
     load()
   }
 
   function openAdd() { setEditTarget(null); setShowModal(true) }
   function openEdit(a: Account, idx: number) { setEditTarget({ ...a, idx }); setShowModal(true) }
+
+  function requestSetMaster(idx: number, name: string) {
+    const current = accounts.find(a => a.is_master)
+    if (!current || current.name === name) {
+      confirmSetMaster(idx)
+      return
+    }
+    setMasterConfirm({ pendingIdx: idx, pendingName: name, currentMaster: current.name })
+  }
+
+  async function confirmSetMaster(idx: number) {
+    setMasterConfirm(null)
+    setSettingMaster(idx)
+    try {
+      await api.accounts.setMaster(idx)
+      await load()
+    } finally {
+      setSettingMaster(null)
+    }
+  }
 
   return (
     <div className="p-4 sm:p-6">
@@ -285,7 +320,16 @@ export default function Accounts() {
                 {accounts.map((a, i) => (
                   <>
                     <tr key={i} className="border-b border-border last:border-0 hover:bg-s2/50 transition-colors">
-                      <td className="px-4 py-3 font-semibold">{a.name}</td>
+                      <td className="px-4 py-3 font-semibold">
+                        <span className="flex items-center gap-2">
+                          {a.name}
+                          {a.is_master && (
+                            <span className="text-[9px] font-bold uppercase tracking-widest px-1.5 py-0.5 rounded bg-accent/15 text-accent border border-accent/30">
+                              Master
+                            </span>
+                          )}
+                        </span>
+                      </td>
                       <td className="px-4 py-3 font-mono text-[13px]">
                         {liveBalances[i] === undefined
                           ? <span className="text-muted">…</span>
@@ -325,6 +369,15 @@ export default function Accounts() {
                         >
                           {expandedIdx === i ? '▲ Hide' : '▼ Monitor'}
                         </button>
+                        {!a.is_master && (
+                          <button
+                            onClick={() => requestSetMaster(i, a.name)}
+                            disabled={settingMaster === i}
+                            className="text-[12px] px-2 py-1 rounded-md border border-accent/40 text-accent hover:bg-accent/10 transition-colors mr-2 disabled:opacity-40"
+                          >
+                            {settingMaster === i ? '…' : 'Set Master'}
+                          </button>
+                        )}
                         <button onClick={() => openEdit(a, i)} className="btn-ghost text-[12px] mr-2">Edit</button>
                         <button onClick={() => del(i, a.name)} className="text-[12px] px-2 py-1 rounded-md bg-red/10 text-red hover:bg-red/20 transition-colors">✕</button>
                       </td>
@@ -348,6 +401,64 @@ export default function Accounts() {
           onClose={() => setShowModal(false)}
           onSave={load}
         />
+      )}
+
+      {deleteConfirm && (
+        <div className="fixed inset-0 bg-black/65 backdrop-blur-sm z-50 flex items-center justify-center p-4" onClick={() => setDeleteConfirm(null)}>
+          <div className="bg-s1 border border-border rounded-2xl p-6 w-full max-w-sm shadow-2xl" onClick={e => e.stopPropagation()}>
+            <div className="flex items-start gap-3 mb-4">
+              <div className="w-8 h-8 rounded-full bg-red/15 border border-red/30 flex items-center justify-center flex-shrink-0 mt-0.5">
+                <svg className="w-4 h-4 text-red" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}><polyline points="3 6 5 6 21 6"/><path d="M19 6l-1 14H6L5 6"/><path d="M10 11v6M14 11v6"/><path d="M9 6V4h6v2"/></svg>
+              </div>
+              <div>
+                <h2 className="text-sm font-bold">Remove Account?</h2>
+                <p className="text-muted text-[12px] mt-1.5 leading-relaxed">
+                  <span className="text-tx font-semibold">{deleteConfirm.name}</span> will be permanently removed from the bot.
+                  This cannot be undone.
+                </p>
+              </div>
+            </div>
+            <div className="flex gap-2 justify-end">
+              <button onClick={() => setDeleteConfirm(null)} className="btn-ghost text-[13px]">Cancel</button>
+              <button
+                onClick={confirmDelete}
+                className="text-[13px] px-4 py-1.5 rounded-lg bg-red text-white font-semibold hover:opacity-90 transition-opacity"
+              >
+                Remove
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {masterConfirm && (
+        <div className="fixed inset-0 bg-black/65 backdrop-blur-sm z-50 flex items-center justify-center p-4" onClick={() => setMasterConfirm(null)}>
+          <div className="bg-s1 border border-border rounded-2xl p-6 w-full max-w-sm shadow-2xl" onClick={e => e.stopPropagation()}>
+            <div className="flex items-start gap-3 mb-4">
+              <div className="w-8 h-8 rounded-full bg-amber-500/15 border border-amber-500/30 flex items-center justify-center flex-shrink-0 mt-0.5">
+                <svg className="w-4 h-4 text-amber-400" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}><path strokeLinecap="round" strokeLinejoin="round" d="M12 9v3.75m-9.303 3.376c-.866 1.5.217 3.374 1.948 3.374h14.71c1.73 0 2.813-1.874 1.948-3.374L13.949 3.378c-.866-1.5-3.032-1.5-3.898 0L2.697 16.126z"/></svg>
+              </div>
+              <div>
+                <h2 className="text-sm font-bold">Change Master Account?</h2>
+                <p className="text-muted text-[12px] mt-1.5 leading-relaxed">
+                  <span className="text-tx font-semibold">{masterConfirm.currentMaster}</span> is currently the master account.
+                  Setting <span className="text-tx font-semibold">{masterConfirm.pendingName}</span> as master will demote{' '}
+                  <span className="text-tx font-semibold">{masterConfirm.currentMaster}</span> to a child account — it will
+                  continue receiving signals and trading normally, just without master status.
+                </p>
+              </div>
+            </div>
+            <div className="flex gap-2 justify-end">
+              <button onClick={() => setMasterConfirm(null)} className="btn-ghost text-[13px]">Cancel</button>
+              <button
+                onClick={() => confirmSetMaster(masterConfirm.pendingIdx)}
+                className="text-[13px] px-4 py-1.5 rounded-lg bg-accent text-bg font-semibold hover:opacity-90 transition-opacity"
+              >
+                Yes, Change Master
+              </button>
+            </div>
+          </div>
+        </div>
       )}
     </div>
   )

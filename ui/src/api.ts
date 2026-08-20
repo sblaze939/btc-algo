@@ -34,6 +34,7 @@ export interface Account {
   name: string
   account_size: number
   active: boolean
+  is_master: boolean
   api_key_masked: string       // truncated, no secret exposed
 }
 
@@ -48,6 +49,7 @@ export interface AccountInput {
 
 export interface Settings {
   dry_run: boolean
+  live_from: string
   current_expiry: string
   signal_mode: string
   alert_chat_id: string
@@ -58,6 +60,7 @@ export interface Settings {
 
 export interface SettingsInput {
   dry_run: boolean
+  live_from: string
   current_expiry: string
   signal_mode: string
   alert_chat_id: string
@@ -150,6 +153,7 @@ export const api = {
     add:       (a: AccountInput)          => req<{ ok: boolean }>('POST', '/api/accounts', a),
     update:    (i: number, a: AccountInput) => req<{ ok: boolean }>('PUT', `/api/accounts/${i}`, a),
     toggle:    (i: number)                => req<{ ok: boolean; active: boolean }>('PATCH', `/api/accounts/${i}/toggle`),
+    setMaster: (i: number)                => req<{ ok: boolean; previous_master: string | null }>('PATCH', `/api/accounts/${i}/set-master`),
     delete:    (i: number)                => req<{ ok: boolean }>('DELETE', `/api/accounts/${i}`),
     detail:    (i: number)                => req<AccountDetail>('GET', `/api/portfolio/account/${i}`),
   },

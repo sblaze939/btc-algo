@@ -366,6 +366,7 @@ async def list_accounts(_=Depends(auth)):
         a = dict(a)
         masked = (a.get("api_key") or "")[:8] + "…" if a.get("api_key") else ""
         a["api_key_masked"] = masked
+        a["is_master"] = bool(a.get("is_master", False))
         a.pop("api_key", None)
         a.pop("api_secret", None)
         result.append(a)
@@ -405,6 +406,18 @@ async def toggle_account(idx: int, _=Depends(auth)):
     return {"ok": True, "active": accs[idx]["active"]}
 
 
+@app.patch("/api/accounts/{idx}/set-master")
+async def set_master(idx: int, _=Depends(auth)):
+    accs = _read_accs()
+    if not (0 <= idx < len(accs)):
+        raise HTTPException(404, "Not found")
+    previous = next((a["name"] for a in accs if a.get("is_master")), None)
+    for i, a in enumerate(accs):
+        a["is_master"] = (i == idx)
+    _write_accs(accs)
+    return {"ok": True, "previous_master": previous}
+
+
 @app.delete("/api/accounts/{idx}")
 async def delete_account(idx: int, _=Depends(auth)):
     accs = _read_accs()
@@ -420,20 +433,20 @@ async def delete_account(idx: int, _=Depends(auth)):
 @app.get("/api/settings")
 async def get_settings(_=Depends(auth)):
     return {
-        "dry_run": _env_get("DRY_RUN").lower() == "true",
-        "live_from": _env_get("LIVE_FROM"),
-        "signal_mode": _env_get("SIGNAL_MODE") or "image",
-        "alert_chat_id": _env_get("TELEGRAM_ALERT_CHAT_ID"),
+        "dry_run":         _env_get("DRY_RUN").lower() == "true",
+        "live_from":       _env_get("LIVE_FROM"),
+        "signal_mode":     _env_get("SIGNAL_MODE") or "image",
+        "alert_chat_id":   _env_get("TELEGRAM_ALERT_CHAT_ID"),
         "source_channel_id": _env_get("TELEGRAM_CHANNEL_ID"),
-        "current_expiry": _env_get("CURRENT_EXPIRY") or _env_get("LIVE_FROM"),
-        "api_key_set": bool(_env_get("COINSWITCH_API_KEY")),
+        "current_expiry":  _env_get("CURRENT_EXPIRY") or _env_get("LIVE_FROM"),
+        "api_key_set":     bool(_env_get("COINSWITCH_API_KEY")),
         "api_key_expires": _env_get("COINSWITCH_API_EXPIRY") or None,
     }
 
 
 class SettingsInput(BaseModel):
     dry_run: bool
-    live_from: str
+    live_from: str = ""
     signal_mode: str
     alert_chat_id: str
     source_channel_id: str = ""

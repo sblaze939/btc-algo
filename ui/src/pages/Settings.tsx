@@ -45,6 +45,7 @@ export default function Settings() {
   const [data, setData] = useState<SettingsData | null>(null)
   const [form, setForm] = useState<SettingsInput>({
     dry_run: true,
+    live_from: '',
     current_expiry: '',
     signal_mode: 'image',
     alert_chat_id: '',
@@ -64,6 +65,7 @@ export default function Settings() {
       setData(s)
       setForm({
         dry_run: s.dry_run,
+        live_from: s.live_from ?? '',
         current_expiry: s.current_expiry,
         signal_mode: s.signal_mode,
         alert_chat_id: s.alert_chat_id,
@@ -111,6 +113,19 @@ export default function Settings() {
             <div className="w-11 h-6 bg-s3 rounded-full peer-checked:bg-green transition-colors" />
             <div className="absolute left-1 top-1 w-4 h-4 bg-white rounded-full transition-all peer-checked:translate-x-5 shadow" />
           </label>
+        </div>
+
+        <div className="flex items-center justify-between">
+          <div>
+            <div className="font-semibold text-sm">Live From</div>
+            <div className="text-muted text-[12px] mt-0.5">Bot won't place real orders before this date even if Dry Run is off.</div>
+          </div>
+          <input
+            type="date"
+            className="input w-40"
+            value={form.live_from}
+            onChange={e => setForm(f => ({ ...f, live_from: e.target.value }))}
+          />
         </div>
 
         <div className="flex items-center justify-between">
