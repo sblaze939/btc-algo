@@ -6,6 +6,7 @@ import Accounts from './pages/Accounts'
 import Journal from './pages/Journal'
 import Settings from './pages/Settings'
 import Logs from './pages/Logs'
+import Trading from './pages/Trading'
 
 export default function App() {
   return (
@@ -15,6 +16,7 @@ export default function App() {
         <Route index element={<Navigate to="/dashboard" replace />} />
         <Route path="/dashboard" element={<Dashboard />} />
         <Route path="/accounts"  element={<Accounts />} />
+        <Route path="/trading"   element={<Trading />} />
         <Route path="/journal"   element={<Journal />} />
         <Route path="/settings"  element={<Settings />} />
         <Route path="/logs"      element={<Logs />} />

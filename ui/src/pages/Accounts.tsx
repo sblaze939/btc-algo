@@ -225,6 +225,87 @@ function AccDetailPanel({ idx, onClose }: { idx: number; onClose: () => void }) 
   )
 }
 
+function FundModal({ idx, name, onClose }: { idx: number; name: string; onClose: () => void }) {
+  const [amt, setAmt] = useState('')
+  const [transferring, setTransferring] = useState<'IN' | 'OUT' | null>(null)
+  const [msg, setMsg] = useState<{ ok: boolean; text: string } | null>(null)
+
+  async function doTransfer(direction: 'IN' | 'OUT') {
+    const amount = parseFloat(amt)
+    if (!amount || amount <= 0) return
+    setTransferring(direction)
+    setMsg(null)
+    try {
+      const res = await api.funds.transferForAccount(idx, direction, amount)
+      setMsg({ ok: true, text: direction === 'IN'
+        ? `₹${amount.toLocaleString()} → trading wallet (~${(amount / 94).toFixed(1)} USDT)`
+        : `₹${amount.toLocaleString()} ← returned to Spot Wallet` })
+      setAmt('')
+    } catch (e: any) {
+      setMsg({ ok: false, text: e.message ?? 'Transfer failed' })
+    } finally {
+      setTransferring(null)
+    }
+  }
+
+  return (
+    <div className="fixed inset-0 bg-black/65 backdrop-blur-sm z-50 flex items-center justify-center p-4" onClick={onClose}>
+      <div className="bg-s1 border border-border rounded-2xl p-6 w-full max-w-md shadow-2xl" onClick={e => e.stopPropagation()}>
+        <h2 className="text-base font-bold mb-1">Fund Trading Wallet</h2>
+        <p className="text-[12px] text-muted mb-4 leading-relaxed">
+          <span className="font-semibold text-tx">{name}</span> — transfers between CoinSwitch <span className="text-tx font-semibold">Spot Wallet (INR)</span> and the <span className="text-tx font-semibold">HFT/DMA trading wallet</span>. INR is converted at ~₹94/USDT.
+          <br />
+          <span className="text-amber-400 text-[11px]">Make sure INR is in the Spot Wallet first — not Options Wallet.</span>
+        </p>
+
+        <div className="space-y-3">
+          <div>
+            <label className="text-[11px] text-muted font-semibold uppercase tracking-wider block mb-1">Amount (₹)</label>
+            <input
+              className="input font-mono"
+              type="number"
+              min="1"
+              placeholder="e.g. 50000"
+              value={amt}
+              onChange={e => setAmt(e.target.value)}
+            />
+            {amt && parseFloat(amt) > 0 && (
+              <p className="text-[11px] text-muted mt-1">≈ {(parseFloat(amt) / 94).toFixed(2)} USDT at ₹94/USDT</p>
+            )}
+          </div>
+
+          {msg && (
+            <p className={`text-[12px] ${msg.ok ? 'text-green' : 'text-red'}`}>
+              {msg.ok ? '✓' : '✗'} {msg.text}
+            </p>
+          )}
+
+          <div className="flex gap-2 pt-1">
+            <button
+              onClick={() => doTransfer('IN')}
+              disabled={!!transferring || !amt}
+              className="flex-1 py-2 rounded-lg border border-green/50 text-green text-[12px] font-semibold hover:bg-green/10 transition-colors disabled:opacity-40"
+            >
+              {transferring === 'IN' ? 'Moving…' : 'Spot → Trading'}
+            </button>
+            <button
+              onClick={() => doTransfer('OUT')}
+              disabled={!!transferring || !amt}
+              className="flex-1 py-2 rounded-lg border border-border text-muted text-[12px] font-semibold hover:text-tx hover:border-tx/40 transition-colors disabled:opacity-40"
+            >
+              {transferring === 'OUT' ? 'Moving…' : 'Trading → Spot'}
+            </button>
+          </div>
+        </div>
+
+        <div className="flex justify-end mt-4">
+          <button onClick={onClose} className="btn-ghost text-[13px]">Close</button>
+        </div>
+      </div>
+    </div>
+  )
+}
+
 interface MasterConfirmState {
   pendingIdx: number
   pendingName: string
@@ -241,6 +322,7 @@ export default function Accounts() {
   const [masterConfirm, setMasterConfirm] = useState<MasterConfirmState | null>(null)
   const [settingMaster, setSettingMaster] = useState<number | null>(null)
   const [deleteConfirm, setDeleteConfirm] = useState<{ idx: number; name: string } | null>(null)
+  const [fundTarget, setFundTarget] = useState<{ idx: number; name: string } | null>(null)
 
   async function load() {
     setLoading(true)
@@ -397,6 +479,12 @@ export default function Accounts() {
                             {settingMaster === i ? '…' : 'Set Master'}
                           </button>
                         )}
+                        <button
+                          onClick={() => setFundTarget({ idx: i, name: a.name })}
+                          className="text-[12px] px-2 py-1 rounded-md border border-green/40 text-green hover:bg-green/10 transition-colors mr-2"
+                        >
+                          Fund
+                        </button>
                         <button onClick={() => openEdit(a, i)} className="btn-ghost text-[12px] mr-2">Edit</button>
                         <button onClick={() => del(i, a.name)} className="text-[12px] px-2 py-1 rounded-md bg-red/10 text-red hover:bg-red/20 transition-colors">✕</button>
                       </td>
@@ -448,6 +536,14 @@ export default function Accounts() {
             </div>
           </div>
         </div>
+      )}
+
+      {fundTarget && (
+        <FundModal
+          idx={fundTarget.idx}
+          name={fundTarget.name}
+          onClose={() => setFundTarget(null)}
+        />
       )}
 
       {masterConfirm && (

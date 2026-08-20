@@ -644,6 +644,61 @@ async def portfolio_balance(_=Depends(auth)):
         raise HTTPException(502, f"API error: {e}")
 
 
+class FundsTransferInput(BaseModel):
+    amount: float
+    direction: str  # "IN" = Spot Wallet (INR) → HFT/DMA wallet (USDT at ₹94/USDT); "OUT" = reverse
+
+
+@app.post("/api/funds/transfer")
+async def funds_transfer(req: FundsTransferInput, _=Depends(auth)):
+    if not _CS_OK:
+        raise HTTPException(503, "CoinSwitch module unavailable — run: pip install pynacl")
+    if req.direction not in ("IN", "OUT"):
+        raise HTTPException(400, "direction must be IN or OUT")
+    if req.amount <= 0:
+        raise HTTPException(400, "amount must be positive")
+    try:
+        import uuid as _uuid
+        k, s = _env_get("COINSWITCH_API_KEY"), _env_get("COINSWITCH_API_SECRET")
+        result = _cs_post("/dma/api/v1/funds/transfer", {
+            "client_txn_id": str(_uuid.uuid4()),
+            "direction": req.direction,
+            "amount": req.amount,
+            "quote_asset": "INR",   # required for INR accounts; CoinSwitch converts at ~₹94/USDT
+        }, k, s)
+        balance = _fetch_wallet(k, s)
+        return {"ok": True, "transfer_result": result, "trading_balance": balance}
+    except Exception as e:
+        raise HTTPException(502, f"Transfer failed: {e}")
+
+
+@app.post("/api/accounts/{idx}/transfer")
+async def account_transfer(idx: int, req: FundsTransferInput, _=Depends(auth)):
+    """Transfer funds between Spot Wallet (INR) and HFT/DMA wallet for a specific account."""
+    if not _CS_OK:
+        raise HTTPException(503, "CoinSwitch module unavailable — run: pip install pynacl")
+    if req.direction not in ("IN", "OUT"):
+        raise HTTPException(400, "direction must be IN or OUT")
+    if req.amount <= 0:
+        raise HTTPException(400, "amount must be positive")
+    accs = _read_accs()
+    if idx < 0 or idx >= len(accs):
+        raise HTTPException(404, "Account not found")
+    try:
+        import uuid as _uuid
+        k, s = _keys_for(accs[idx])
+        result = _cs_post("/dma/api/v1/funds/transfer", {
+            "client_txn_id": str(_uuid.uuid4()),
+            "direction": req.direction,
+            "amount": req.amount,
+            "quote_asset": "INR",
+        }, k, s)
+        balance = _fetch_wallet(k, s)
+        return {"ok": True, "transfer_result": result, "trading_balance": balance}
+    except Exception as e:
+        raise HTTPException(502, f"Transfer failed: {e}")
+
+
 @app.get("/api/portfolio/positions")
 async def portfolio_positions(_=Depends(auth)):
     if not _CS_OK:
@@ -770,11 +825,238 @@ async def get_executions(_=Depends(auth)):
         k, s = _env_get("COINSWITCH_API_KEY"), _env_get("COINSWITCH_API_SECRET")
         r = _cs_get("/v5/execution/list", {"category": "option", "limit": "50"}, k, s)
         execs = r.get("result", {}).get("list", [])
-        # Compute realized PnL sum
         total_pnl = sum(float(e.get("closedPnl", 0)) for e in execs)
         return {"executions": execs, "total_realised_pnl": total_pnl}
     except Exception as e:
         raise HTTPException(502, f"API error: {e}")
+
+
+# ── Per-account trading endpoints ─────────────────────────────────────────────
+
+@app.get("/api/accounts/{idx}/orders")
+async def account_orders(idx: int, _=Depends(auth)):
+    if not _CS_OK:
+        raise HTTPException(503, "CoinSwitch module unavailable")
+    accs = _read_accs()
+    if not (0 <= idx < len(accs)):
+        raise HTTPException(404, "Account not found")
+    k, s = _keys_for(accs[idx])
+    try:
+        return {"orders": _fetch_orders(k, s, accs[idx]["name"])}
+    except Exception as e:
+        raise HTTPException(502, str(e))
+
+
+@app.get("/api/accounts/{idx}/executions")
+async def account_executions(idx: int, limit: int = 30, _=Depends(auth)):
+    if not _CS_OK:
+        raise HTTPException(503, "CoinSwitch module unavailable")
+    accs = _read_accs()
+    if not (0 <= idx < len(accs)):
+        raise HTTPException(404, "Account not found")
+    k, s = _keys_for(accs[idx])
+    try:
+        r = _cs_get("/v5/execution/list", {"category": "option", "limit": str(limit)}, k, s)
+        execs = r.get("result", {}).get("list", [])
+        total_pnl = sum(float(e.get("closedPnl", 0)) for e in execs)
+        return {"executions": execs, "total_realised_pnl": total_pnl}
+    except Exception as e:
+        raise HTTPException(502, str(e))
+
+
+@app.get("/api/market/symbols")
+async def search_symbols(strike: int, option_type: str, _=Depends(auth)):
+    """Search BTC option symbols by strike and type (C or P)."""
+    if not _CS_OK:
+        raise HTTPException(503, "CoinSwitch module unavailable")
+    k, s = _env_get("COINSWITCH_API_KEY"), _env_get("COINSWITCH_API_SECRET")
+    try:
+        r = _cs_get("/v5/market/tickers", {"category": "option", "baseCoin": "BTC"}, k, s)
+        tickers = r.get("result", {}).get("list", [])
+        suffix = f"-{strike}-{option_type.upper()}-USDT"
+        matches = [
+            {
+                "symbol":   t["symbol"],
+                "ask":      t.get("ask1Price", "0"),
+                "bid":      t.get("bid1Price", "0"),
+                "mark":     t.get("markPrice", "0"),
+                "iv":       t.get("markIv", ""),
+                "ask_size": t.get("ask1Size", "0"),
+            }
+            for t in tickers if t["symbol"].endswith(suffix)
+        ]
+        matches.sort(key=lambda x: x["symbol"])
+        return {"symbols": matches}
+    except Exception as e:
+        raise HTTPException(502, str(e))
+
+
+class PlaceOrderReq(BaseModel):
+    symbol:      str
+    side:        str        # Buy or Sell
+    qty:         str        # e.g. "0.01"
+    order_type:  str        # Market or Limit
+    price:       str = ""
+    reduce_only: bool = False
+
+
+@app.post("/api/accounts/{idx}/place-order")
+async def account_place_order(idx: int, req: PlaceOrderReq, _=Depends(auth)):
+    if not _CS_OK:
+        raise HTTPException(503, "CoinSwitch module unavailable")
+    accs = _read_accs()
+    if not (0 <= idx < len(accs)):
+        raise HTTPException(404, "Account not found")
+    k, s = _keys_for(accs[idx])
+    dry_run = _env_get("DRY_RUN").lower() == "true"
+    if dry_run:
+        return {"ok": True, "dry_run": True, "orderId": None, "note": "DRY RUN — no real order placed"}
+    try:
+        body: dict = {
+            "category":    "option",
+            "symbol":      req.symbol,
+            "side":        req.side,
+            "orderType":   req.order_type,
+            "qty":         req.qty,
+            "timeInForce": "GTC" if req.order_type == "Limit" else "IOC",
+            "orderLinkId": str(uuid.uuid4()),
+            "reduceOnly":  req.reduce_only,
+        }
+        if req.order_type == "Limit" and req.price:
+            body["price"] = req.price
+        result = _cs_post("/v5/order/create", body, k, s)
+        if result.get("retCode") == 0:
+            return {"ok": True, "dry_run": False, "orderId": result["result"]["orderId"]}
+        raise HTTPException(400, result.get("retMsg", "Order failed"))
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(502, str(e))
+
+
+# ── Open Orders ────────────────────────────────────────────────────────────────
+
+def _fetch_orders(api_key: str, api_secret: str, account_name: str) -> list:
+    r = _cs_get("/v5/order/realtime", {"category": "option", "limit": "50"}, api_key, api_secret)
+    out = []
+    for o in r.get("result", {}).get("list", []):
+        out.append({
+            "account":     account_name,
+            "orderId":     o["orderId"],
+            "orderLinkId": o.get("orderLinkId", ""),
+            "symbol":      o["symbol"],
+            "side":        o["side"],
+            "orderType":   o.get("orderType", ""),
+            "qty":         o.get("qty", ""),
+            "price":       o.get("price", ""),
+            "orderStatus": o.get("orderStatus", ""),
+            "createdTime": o.get("createdTime", ""),
+        })
+    return out
+
+
+@app.get("/api/portfolio/orders")
+async def portfolio_orders(_=Depends(auth)):
+    if not _CS_OK:
+        raise HTTPException(503, "CoinSwitch module unavailable")
+    orders: list = []
+    errors: list = []
+    try:
+        k, s = _env_get("COINSWITCH_API_KEY"), _env_get("COINSWITCH_API_SECRET")
+        orders += _fetch_orders(k, s, "master")
+    except Exception as e:
+        errors.append(f"master: {e}")
+    for acct in _read_accs():
+        if acct.get("api_key") and acct.get("api_secret"):
+            try:
+                orders += _fetch_orders(acct["api_key"], acct["api_secret"], acct["name"])
+            except Exception as e:
+                errors.append(f"{acct['name']}: {e}")
+    return {"orders": orders, "errors": errors}
+
+
+class CancelOrderReq(BaseModel):
+    symbol:   str
+    order_id: str
+    account:  str  # "master" or account name
+
+
+@app.post("/api/portfolio/orders/cancel")
+async def cancel_order(req: CancelOrderReq, _=Depends(auth)):
+    if not _CS_OK:
+        raise HTTPException(503, "CoinSwitch module unavailable")
+    if req.account == "master":
+        k, s = _env_get("COINSWITCH_API_KEY"), _env_get("COINSWITCH_API_SECRET")
+    else:
+        accs = _read_accs()
+        acct = next((a for a in accs if a["name"] == req.account), None)
+        if not acct:
+            raise HTTPException(404, "Account not found")
+        k, s = _keys_for(acct)
+    try:
+        result = _cs_post("/v5/order/cancel", {
+            "category": "option",
+            "symbol":   req.symbol,
+            "orderId":  req.order_id,
+        }, k, s)
+        if result.get("retCode") == 0:
+            return {"ok": True, "orderId": result["result"]["orderId"]}
+        raise HTTPException(400, result.get("retMsg", "Cancel failed"))
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(502, str(e))
+
+
+# ── Manual positions ───────────────────────────────────────────────────────────
+
+MANUAL_POS = BOT_DIR / "manual_positions.json"
+
+
+def _read_manual_pos() -> list:
+    return json.loads(MANUAL_POS.read_text()) if MANUAL_POS.exists() else []
+
+
+class ManualPositionInput(BaseModel):
+    account:   str
+    symbol:    str
+    side:      str   # Buy or Sell
+    size:      str
+    avg_price: str
+
+
+@app.get("/api/portfolio/positions/manual")
+async def get_manual_positions(_=Depends(auth)):
+    return {"positions": _read_manual_pos()}
+
+
+@app.post("/api/portfolio/positions/manual")
+async def add_manual_position(pos: ManualPositionInput, _=Depends(auth)):
+    positions = _read_manual_pos()
+    entry = pos.model_dump()
+    entry["id"]        = str(uuid.uuid4())
+    entry["createdAt"] = datetime.now().isoformat()
+    entry["manual"]    = True
+    entry["markPrice"] = "0"
+    if _CS_OK:
+        try:
+            k, s = _env_get("COINSWITCH_API_KEY"), _env_get("COINSWITCH_API_SECRET")
+            ticker_r = _cs_get("/v5/market/tickers", {"category": "option", "symbol": pos.symbol}, k, s)
+            tickers = ticker_r.get("result", {}).get("list", [])
+            if tickers:
+                entry["markPrice"] = tickers[0].get("markPrice", "0")
+        except Exception:
+            pass
+    positions.append(entry)
+    MANUAL_POS.write_text(json.dumps(positions, indent=2))
+    return {"ok": True, "id": entry["id"]}
+
+
+@app.delete("/api/portfolio/positions/manual/{pos_id}")
+async def delete_manual_position(pos_id: str, _=Depends(auth)):
+    positions = [p for p in _read_manual_pos() if p.get("id") != pos_id]
+    MANUAL_POS.write_text(json.dumps(positions, indent=2))
+    return {"ok": True}
 
 
 # ── Serve React build ─────────────────────────────────────────────────────────

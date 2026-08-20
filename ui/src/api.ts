@@ -97,6 +97,49 @@ export interface AccountDetail {
   positions: Position[]
 }
 
+export interface OpenOrder {
+  account:     string
+  orderId:     string
+  orderLinkId: string
+  symbol:      string
+  side:        string
+  orderType:   string
+  qty:         string
+  price:       string
+  orderStatus: string
+  createdTime: string
+}
+
+export interface SymbolMatch {
+  symbol:   string
+  ask:      string
+  bid:      string
+  mark:     string
+  iv:       string
+  ask_size: string
+}
+
+export interface PlaceOrderInput {
+  symbol:      string
+  side:        'Buy' | 'Sell'
+  qty:         string
+  order_type:  'Market' | 'Limit'
+  price?:      string
+  reduce_only?: boolean
+}
+
+export interface ManualPosition {
+  id:        string
+  account:   string
+  symbol:    string
+  side:      string
+  size:      string
+  avg_price: string
+  markPrice: string
+  manual:    true
+  createdAt: string
+}
+
 export interface TradeRecord {
   timestamp: string
   account: string
@@ -153,13 +196,22 @@ export const api = {
   },
 
   accounts: {
-    list:      ()                         => req<Account[]>('GET', '/api/accounts'),
-    add:       (a: AccountInput)          => req<{ ok: boolean }>('POST', '/api/accounts', a),
-    update:    (i: number, a: AccountInput) => req<{ ok: boolean }>('PUT', `/api/accounts/${i}`, a),
-    toggle:    (i: number)                => req<{ ok: boolean; active: boolean }>('PATCH', `/api/accounts/${i}/toggle`),
-    setMaster: (i: number)                => req<{ ok: boolean; previous_master: string | null }>('PATCH', `/api/accounts/${i}/set-master`),
-    delete:    (i: number)                => req<{ ok: boolean }>('DELETE', `/api/accounts/${i}`),
-    detail:    (i: number)                => req<AccountDetail>('GET', `/api/portfolio/account/${i}`),
+    list:       ()                          => req<Account[]>('GET', '/api/accounts'),
+    add:        (a: AccountInput)           => req<{ ok: boolean }>('POST', '/api/accounts', a),
+    update:     (i: number, a: AccountInput) => req<{ ok: boolean }>('PUT', `/api/accounts/${i}`, a),
+    toggle:     (i: number)                 => req<{ ok: boolean; active: boolean }>('PATCH', `/api/accounts/${i}/toggle`),
+    setMaster:  (i: number)                 => req<{ ok: boolean; previous_master: string | null }>('PATCH', `/api/accounts/${i}/set-master`),
+    delete:     (i: number)                 => req<{ ok: boolean }>('DELETE', `/api/accounts/${i}`),
+    detail:     (i: number)                 => req<AccountDetail>('GET', `/api/portfolio/account/${i}`),
+    orders:     (i: number)                 => req<{ orders: OpenOrder[] }>('GET', `/api/accounts/${i}/orders`),
+    executions: (i: number)                 => req<ExecutionsData>('GET', `/api/accounts/${i}/executions`),
+    placeOrder: (i: number, o: PlaceOrderInput) =>
+                  req<{ ok: boolean; dry_run: boolean; orderId: string | null; note?: string }>('POST', `/api/accounts/${i}/place-order`, o),
+  },
+
+  market: {
+    symbols: (strike: number, option_type: 'C' | 'P') =>
+      req<{ symbols: SymbolMatch[] }>('GET', `/api/market/symbols?strike=${strike}&option_type=${option_type}`),
   },
 
   settings: {
@@ -172,10 +224,26 @@ export const api = {
     positions:  () => req<{ positions: Position[]; errors: string[] }>('GET', '/api/portfolio/positions'),
     close:      (b: { symbol: string; side: string; size: string; account: string }) =>
                   req<{ ok: boolean; orderId: string }>('POST', '/api/portfolio/close', b),
+    orders:     () => req<{ orders: OpenOrder[]; errors: string[] }>('GET', '/api/portfolio/orders'),
+    cancelOrder: (b: { symbol: string; order_id: string; account: string }) =>
+                  req<{ ok: boolean; orderId: string }>('POST', '/api/portfolio/orders/cancel', b),
+    manualPositions: {
+      list:   () => req<{ positions: ManualPosition[] }>('GET', '/api/portfolio/positions/manual'),
+      add:    (p: { account: string; symbol: string; side: string; size: string; avg_price: string }) =>
+                req<{ ok: boolean; id: string }>('POST', '/api/portfolio/positions/manual', p),
+      remove: (id: string) => req<{ ok: boolean }>('DELETE', `/api/portfolio/positions/manual/${id}`),
+    },
   },
 
   journal: {
     trades:     () => req<JournalData>('GET', '/api/journal'),
     executions: () => req<ExecutionsData>('GET', '/api/journal/executions'),
+  },
+
+  funds: {
+    transferForAccount: (idx: number, direction: 'IN' | 'OUT', amount: number) =>
+      req<{ ok: boolean; transfer_result: unknown; trading_balance: WalletBalance }>(
+        'POST', `/api/accounts/${idx}/transfer`, { direction, amount }
+      ),
   },
 }

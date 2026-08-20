@@ -1,6 +1,6 @@
 import { useEffect, useState } from 'react'
 import { useOutletContext, Link } from 'react-router-dom'
-import { api, BotStatus, Position, WalletBalance } from '../api'
+import { api, BotStatus, ManualPosition, OpenOrder, Position, WalletBalance } from '../api'
 
 interface Ctx { status: BotStatus | null; refetchStatus: () => void }
 
@@ -28,13 +28,92 @@ function fmt(n: number, decimals = 2) {
 
 function closeSide(side: string) { return side === 'Sell' ? 'Buy' : 'Sell' }
 
+type AnyPosition = (Position & { manual?: false }) | ManualPosition
+
+function AddPositionModal({ onClose, onAdded }: { onClose: () => void; onAdded: () => void }) {
+  const [form, setForm] = useState({ account: 'master', symbol: '', side: 'Buy', size: '0.01', avg_price: '' })
+  const [saving, setSaving] = useState(false)
+  const [err, setErr] = useState('')
+  const set = (k: string, v: string) => setForm(f => ({ ...f, [k]: v }))
+
+  async function submit(e: React.FormEvent) {
+    e.preventDefault()
+    if (!form.symbol || !form.avg_price) { setErr('Symbol and Avg Price are required'); return }
+    setSaving(true); setErr('')
+    try {
+      await api.portfolio.manualPositions.add(form)
+      onAdded(); onClose()
+    } catch (ex: any) {
+      setErr(ex.message ?? 'Failed to add')
+    } finally {
+      setSaving(false)
+    }
+  }
+
+  return (
+    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 p-4">
+      <div className="bg-s1 border border-border rounded-card p-6 w-full max-w-sm space-y-4 shadow-xl">
+        <div className="flex items-center justify-between">
+          <h3 className="font-semibold text-sm">Add Manual Position</h3>
+          <button onClick={onClose} className="text-muted hover:text-tx text-lg leading-none">×</button>
+        </div>
+        <p className="text-[11px] text-muted leading-snug">
+          Use this to track a position that exists on Bybit but wasn't recorded by the bot.
+          It won't affect real orders — you can close it via the Close button.
+        </p>
+        <form onSubmit={submit} className="space-y-3">
+          {[
+            { label: 'Account', key: 'account', placeholder: 'master' },
+            { label: 'Symbol', key: 'symbol', placeholder: 'BTC-27SEP26-80000-C-USDT' },
+            { label: 'Size (BTC)', key: 'size', placeholder: '0.01' },
+            { label: 'Avg Entry Price (USDT)', key: 'avg_price', placeholder: '340.00' },
+          ].map(({ label, key, placeholder }) => (
+            <label key={key} className="block">
+              <span className="text-[11px] text-muted mb-1 block">{label}</span>
+              <input
+                value={(form as any)[key]}
+                onChange={e => set(key, e.target.value)}
+                placeholder={placeholder}
+                className="w-full bg-bg border border-border rounded px-3 py-1.5 text-sm text-tx focus:outline-none focus:border-accent"
+              />
+            </label>
+          ))}
+          <label className="block">
+            <span className="text-[11px] text-muted mb-1 block">Side</span>
+            <select
+              value={form.side}
+              onChange={e => set('side', e.target.value)}
+              className="w-full bg-bg border border-border rounded px-3 py-1.5 text-sm text-tx focus:outline-none focus:border-accent"
+            >
+              <option value="Buy">Buy</option>
+              <option value="Sell">Sell</option>
+            </select>
+          </label>
+          {err && <p className="text-[11px] text-red">{err}</p>}
+          <button
+            type="submit" disabled={saving}
+            className="w-full py-2 rounded bg-accent text-bg text-sm font-semibold hover:opacity-90 transition-opacity disabled:opacity-40"
+          >
+            {saving ? 'Adding…' : 'Add Position'}
+          </button>
+        </form>
+      </div>
+    </div>
+  )
+}
+
 export default function Dashboard() {
   const { status } = useOutletContext<Ctx>()
   const [logs, setLogs] = useState<string[]>([])
   const [uptime, setUptime] = useState<number | null>(null)
   const [wallet, setWallet] = useState<WalletBalance | null>(null)
-  const [positions, setPositions] = useState<Position[]>([])
+  const [positions, setPositions] = useState<AnyPosition[]>([])
+  const [orders, setOrders] = useState<OpenOrder[]>([])
   const [closing, setClosing] = useState<string | null>(null)
+  const [cancelling, setCancelling] = useState<string | null>(null)
+  const [showAddPos, setShowAddPos] = useState(false)
+  const [removingManual, setRemovingManual] = useState<string | null>(null)
+
 
   useEffect(() => {
     if (status?.uptime_seconds != null) setUptime(status.uptime_seconds)
@@ -55,21 +134,29 @@ export default function Dashboard() {
     return () => clearInterval(id)
   }, [])
 
-  // Fetch wallet + positions every 30s
+  // Fetch wallet + positions + orders + manual positions every 30s
   useEffect(() => {
-    const fetch = async () => {
+    const fetchAll = async () => {
       try { setWallet(await api.portfolio.balance()) } catch { /**/ }
-      try { const r = await api.portfolio.positions(); setPositions(r.positions) } catch { /**/ }
+      try {
+        const [real, manual] = await Promise.all([
+          api.portfolio.positions(),
+          api.portfolio.manualPositions.list(),
+        ])
+        setPositions([...real.positions, ...manual.positions] as AnyPosition[])
+      } catch { /**/ }
+      try { const r = await api.portfolio.orders(); setOrders(r.orders) } catch { /**/ }
     }
-    fetch()
-    const id = setInterval(fetch, 30_000)
+    fetchAll()
+    const id = setInterval(fetchAll, 30_000)
     return () => clearInterval(id)
   }, [])
 
-  async function closePosition(pos: Position) {
+  async function closePosition(pos: AnyPosition) {
+    const size = 'size' in pos ? pos.size : (pos as any).size
     setClosing(pos.symbol + pos.account)
     try {
-      await api.portfolio.close({ symbol: pos.symbol, side: pos.side, size: pos.size, account: pos.account })
+      await api.portfolio.close({ symbol: pos.symbol, side: pos.side, size, account: pos.account })
     } catch (e: any) {
       alert(e.message ?? 'Close failed')
     } finally {
@@ -77,10 +164,46 @@ export default function Dashboard() {
     }
   }
 
+  async function cancelOrder(o: OpenOrder) {
+    setCancelling(o.orderId)
+    try {
+      await api.portfolio.cancelOrder({ symbol: o.symbol, order_id: o.orderId, account: o.account })
+      setOrders(prev => prev.filter(x => x.orderId !== o.orderId))
+    } catch (e: any) {
+      alert(e.message ?? 'Cancel failed')
+    } finally {
+      setCancelling(null)
+    }
+  }
+
+  async function removeManual(id: string) {
+    setRemovingManual(id)
+    try {
+      await api.portfolio.manualPositions.remove(id)
+      setPositions(prev => prev.filter(p => !('manual' in p && (p as ManualPosition).id === id)))
+    } catch (e: any) {
+      alert(e.message ?? 'Remove failed')
+    } finally {
+      setRemovingManual(null)
+    }
+  }
+
   const running = status?.running ?? false
 
   return (
     <div className="p-4 sm:p-6 space-y-4">
+      {showAddPos && (
+        <AddPositionModal
+          onClose={() => setShowAddPos(false)}
+          onAdded={async () => {
+            const [real, manual] = await Promise.all([
+              api.portfolio.positions(),
+              api.portfolio.manualPositions.list(),
+            ])
+            setPositions([...real.positions, ...manual.positions] as AnyPosition[])
+          }}
+        />
+      )}
 
       {/* Hero status */}
       <div className={[
@@ -164,7 +287,9 @@ export default function Dashboard() {
         </div>
         <div className="card p-4 col-span-2 sm:col-span-1">
           <div className="text-[10px] font-semibold text-muted uppercase tracking-widest mb-2.5">Open Positions</div>
-          <div className="font-mono text-xl font-bold text-tx tabular-nums">{positions.length}</div>
+          <div className="font-mono text-xl font-bold text-tx tabular-nums">
+            {positions.filter(p => !('manual' in p)).length}
+          </div>
           <div className="text-[11px] text-muted mt-1.5">
             <Link to="/journal" className="hover:text-accent transition-colors">View journal →</Link>
           </div>
@@ -172,45 +297,137 @@ export default function Dashboard() {
       </div>
 
       {/* Open positions table */}
-      {positions.length > 0 && (
-        <div className="bg-s1 border border-border rounded-card p-4">
-          <div className="text-[10px] font-semibold text-muted uppercase tracking-widest mb-3">Open Positions</div>
+      <div className="bg-s1 border border-border rounded-card p-4">
+        <div className="flex items-center justify-between mb-3">
+          <div className="text-[10px] font-semibold text-muted uppercase tracking-widest">
+            Open Positions {positions.length > 0 && <span className="text-accent">({positions.length})</span>}
+          </div>
+          <button
+            onClick={() => setShowAddPos(true)}
+            className="text-[11px] px-2.5 py-1 rounded border border-accent/50 text-accent hover:bg-accent/10 transition-colors"
+          >
+            + Add Missing
+          </button>
+        </div>
+        {positions.length === 0 ? (
+          <p className="text-[12px] text-muted">No open positions.</p>
+        ) : (
           <div className="overflow-x-auto">
             <table className="w-full text-[12px]">
               <thead>
                 <tr className="text-left text-muted border-b border-border">
-                  <th className="pb-2 font-semibold pr-4">Symbol</th>
-                  <th className="pb-2 font-semibold pr-4">Account</th>
-                  <th className="pb-2 font-semibold pr-4">Side</th>
-                  <th className="pb-2 font-semibold pr-4">Size</th>
-                  <th className="pb-2 font-semibold pr-4">Avg Price</th>
-                  <th className="pb-2 font-semibold pr-4">Mark</th>
-                  <th className="pb-2 font-semibold pr-4">uPnL</th>
+                  <th className="pb-2 font-semibold pr-3">Symbol</th>
+                  <th className="pb-2 font-semibold pr-3">Account</th>
+                  <th className="pb-2 font-semibold pr-3">Side</th>
+                  <th className="pb-2 font-semibold pr-3">Size</th>
+                  <th className="pb-2 font-semibold pr-3">Avg Price</th>
+                  <th className="pb-2 font-semibold pr-3">Mark</th>
+                  <th className="pb-2 font-semibold pr-3">uPnL</th>
                   <th className="pb-2"></th>
                 </tr>
               </thead>
               <tbody>
                 {positions.map((p, i) => {
-                  const pnl = parseFloat(p.unrealisedPnl)
-                  const key = p.symbol + p.account
+                  const isManual = 'manual' in p && p.manual
+                  const avgPrice = isManual ? parseFloat((p as ManualPosition).avg_price) : parseFloat((p as Position).avgPrice)
+                  const markPrice = parseFloat(p.markPrice)
+                  const size = isManual ? parseFloat((p as ManualPosition).size) : parseFloat((p as Position).size)
+                  const pnl = isManual
+                    ? (p.side === 'Buy' ? (markPrice - avgPrice) : (avgPrice - markPrice)) * size
+                    : parseFloat((p as Position).unrealisedPnl)
+                  const key = p.symbol + p.account + i
                   return (
                     <tr key={i} className="border-b border-border/40 last:border-0">
-                      <td className="py-2 pr-4 font-mono text-tx/90">{p.symbol}</td>
-                      <td className="py-2 pr-4 text-muted capitalize">{p.account}</td>
-                      <td className={`py-2 pr-4 font-semibold ${p.side === 'Sell' ? 'text-red' : 'text-green'}`}>{p.side}</td>
-                      <td className="py-2 pr-4 tabular-nums">{p.size}</td>
-                      <td className="py-2 pr-4 font-mono tabular-nums">{parseFloat(p.avgPrice).toFixed(2)}</td>
-                      <td className="py-2 pr-4 font-mono tabular-nums">{parseFloat(p.markPrice).toFixed(2)}</td>
-                      <td className={`py-2 pr-4 font-mono tabular-nums font-semibold ${pnl >= 0 ? 'text-green' : 'text-red'}`}>
-                        {fmt(pnl)}
+                      <td className="py-2 pr-3 font-mono text-tx/90">
+                        {p.symbol}
+                        {isManual && (
+                          <span className="ml-1.5 text-[9px] font-bold px-1.5 py-0.5 rounded-full bg-yellow-400/15 text-yellow-400 border border-yellow-400/30">MANUAL</span>
+                        )}
                       </td>
-                      <td className="py-2">
+                      <td className="py-2 pr-3 text-muted capitalize">{p.account}</td>
+                      <td className={`py-2 pr-3 font-semibold ${p.side === 'Sell' ? 'text-red' : 'text-green'}`}>{p.side}</td>
+                      <td className="py-2 pr-3 tabular-nums">{isManual ? (p as ManualPosition).size : (p as Position).size}</td>
+                      <td className="py-2 pr-3 font-mono tabular-nums">{avgPrice.toFixed(2)}</td>
+                      <td className="py-2 pr-3 font-mono tabular-nums">{markPrice > 0 ? markPrice.toFixed(2) : '—'}</td>
+                      <td className={`py-2 pr-3 font-mono tabular-nums font-semibold ${pnl >= 0 ? 'text-green' : 'text-red'}`}>
+                        {markPrice > 0 ? fmt(pnl) : '—'}
+                      </td>
+                      <td className="py-2 flex gap-1.5">
                         <button
                           onClick={() => closePosition(p)}
                           disabled={!!closing}
                           className="text-[11px] px-2 py-1 rounded border border-red/50 text-red hover:bg-red/10 transition-colors disabled:opacity-40"
                         >
                           {closing === key ? '…' : `Close → ${closeSide(p.side)}`}
+                        </button>
+                        {isManual && (
+                          <button
+                            onClick={() => removeManual((p as ManualPosition).id)}
+                            disabled={removingManual === (p as ManualPosition).id}
+                            className="text-[11px] px-2 py-1 rounded border border-border text-muted hover:text-tx hover:border-muted transition-colors disabled:opacity-40"
+                            title="Remove from tracking (does not cancel on Bybit)"
+                          >
+                            {removingManual === (p as ManualPosition).id ? '…' : 'Remove'}
+                          </button>
+                        )}
+                      </td>
+                    </tr>
+                  )
+                })}
+              </tbody>
+            </table>
+          </div>
+        )}
+      </div>
+
+      {/* Open orders */}
+      <div className="bg-s1 border border-border rounded-card p-4">
+        <div className="flex items-center justify-between mb-3">
+          <div className="text-[10px] font-semibold text-muted uppercase tracking-widest">
+            Open Orders {orders.length > 0 && <span className="text-accent">({orders.length})</span>}
+          </div>
+        </div>
+        {orders.length === 0 ? (
+          <p className="text-[12px] text-muted">No pending orders.</p>
+        ) : (
+          <div className="overflow-x-auto">
+            <table className="w-full text-[12px]">
+              <thead>
+                <tr className="text-left text-muted border-b border-border">
+                  <th className="pb-2 font-semibold pr-3">Symbol</th>
+                  <th className="pb-2 font-semibold pr-3">Account</th>
+                  <th className="pb-2 font-semibold pr-3">Side</th>
+                  <th className="pb-2 font-semibold pr-3">Qty</th>
+                  <th className="pb-2 font-semibold pr-3">Limit Price</th>
+                  <th className="pb-2 font-semibold pr-3">Status</th>
+                  <th className="pb-2 font-semibold pr-3">Placed</th>
+                  <th className="pb-2"></th>
+                </tr>
+              </thead>
+              <tbody>
+                {orders.map((o, i) => {
+                  const ts = parseInt(o.createdTime)
+                  const placed = ts ? new Date(ts).toLocaleString('en-IN', { dateStyle: 'short', timeStyle: 'short' }) : '—'
+                  return (
+                    <tr key={i} className="border-b border-border/40 last:border-0">
+                      <td className="py-2 pr-3 font-mono text-tx/90">{o.symbol}</td>
+                      <td className="py-2 pr-3 text-muted capitalize">{o.account}</td>
+                      <td className={`py-2 pr-3 font-semibold ${o.side === 'Sell' ? 'text-red' : 'text-green'}`}>{o.side}</td>
+                      <td className="py-2 pr-3 tabular-nums">{o.qty}</td>
+                      <td className="py-2 pr-3 font-mono tabular-nums">{o.price} USDT</td>
+                      <td className="py-2 pr-3">
+                        <span className="text-[10px] font-bold px-1.5 py-0.5 rounded-full bg-blue/10 text-blue border border-blue/30">
+                          {o.orderStatus}
+                        </span>
+                      </td>
+                      <td className="py-2 pr-3 text-muted">{placed}</td>
+                      <td className="py-2">
+                        <button
+                          onClick={() => cancelOrder(o)}
+                          disabled={cancelling === o.orderId}
+                          className="text-[11px] px-2 py-1 rounded border border-red/50 text-red hover:bg-red/10 transition-colors disabled:opacity-40"
+                        >
+                          {cancelling === o.orderId ? '…' : 'Cancel'}
                         </button>
                       </td>
                     </tr>
@@ -219,8 +436,8 @@ export default function Dashboard() {
               </tbody>
             </table>
           </div>
-        </div>
-      )}
+        )}
+      </div>
 
       {/* Live log */}
       <div className="bg-s1 border border-border rounded-card p-4">
