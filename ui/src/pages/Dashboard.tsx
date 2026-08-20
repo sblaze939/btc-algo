@@ -133,7 +133,7 @@ export default function Dashboard() {
         {[
           { label: 'Signal Mode', value: (status?.signal_mode ?? '…').toUpperCase(), sub: 'Gemini Vision / text parser', color: 'text-blue/80' },
           { label: 'Trading Mode', value: status ? (status.dry_run ? 'DRY RUN' : 'LIVE') : '…', sub: status?.dry_run ? 'No real orders placed' : 'Real orders active', color: status?.dry_run ? 'text-[#C8A030]' : 'text-green-live' },
-          { label: 'Go-Live Date', value: status?.live_from ?? '…', sub: 'Safety gate — orders blocked before this', color: 'text-tx/70' },
+          { label: 'Go-Live Date', value: status?.live_from || 'Not set', sub: status?.live_from ? 'Orders blocked before this date' : 'No date gate — trading now', color: status?.live_from ? 'text-tx/70' : 'text-muted' },
           { label: 'Bot Status', value: running ? 'Online' : 'Offline', sub: running ? `PID ${status?.pid}` : 'Click Start to begin', color: running ? 'text-green-live' : 'text-red-live' },
         ].map(({ label, value, sub, color }) => (
           <div key={label} className="card p-4">
