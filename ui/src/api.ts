@@ -35,7 +35,8 @@ export interface Account {
   account_size: number
   active: boolean
   is_master: boolean
-  api_key_masked: string       // truncated, no secret exposed
+  api_key_masked: string
+  days_until_expiry: number | null
 }
 
 export interface AccountInput {
@@ -54,8 +55,10 @@ export interface Settings {
   signal_mode: string
   alert_chat_id: string
   source_channel_id: string
+  api_key_validity_days: number
   api_key_set: boolean
   api_key_expires: string
+  master_days_until_expiry: number | null
 }
 
 export interface SettingsInput {
@@ -65,9 +68,10 @@ export interface SettingsInput {
   signal_mode: string
   alert_chat_id: string
   source_channel_id: string
+  api_key_validity_days: number
   bot_token: string
-  cs_api_key: string      // leave blank to keep current
-  cs_api_secret: string   // leave blank to keep current
+  cs_api_key: string
+  cs_api_secret: string
 }
 
 export interface WalletBalance {

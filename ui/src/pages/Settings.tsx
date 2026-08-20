@@ -50,6 +50,7 @@ export default function Settings() {
     signal_mode: 'image',
     alert_chat_id: '',
     source_channel_id: '',
+    api_key_validity_days: 90,
     bot_token: '',
     cs_api_key: '',
     cs_api_secret: '',
@@ -70,6 +71,7 @@ export default function Settings() {
         signal_mode: s.signal_mode,
         alert_chat_id: s.alert_chat_id,
         source_channel_id: s.source_channel_id,
+        api_key_validity_days: s.api_key_validity_days ?? 90,
         bot_token: '',
         cs_api_key: '',
         cs_api_secret: '',
@@ -183,7 +185,8 @@ export default function Settings() {
       {/* Master API */}
       <section className="bg-s1 border border-border rounded-card p-5 space-y-3">
         <h2 className="text-[10px] font-semibold text-muted uppercase tracking-widest mb-1">Master API Configuration</h2>
-        <p className="text-muted text-[12px]">Fallback used when an account has no personal API key. Saving new keys auto-resets the 90-day expiry.</p>
+        <p className="text-muted text-[12px]">Credentials for the master account. Child accounts with their own key use it directly; others fall back to these.</p>
+
         <div>
           <label className="text-[11px] text-muted font-semibold block mb-1">API Key <span className="font-normal">(leave blank to keep current)</span></label>
           <input className="input font-mono text-xs" type="password" value={form.cs_api_key} onChange={e => setForm(f => ({ ...f, cs_api_key: e.target.value }))} placeholder={data.api_key_set ? '(unchanged)' : 'Enter CoinSwitch API key'} />
@@ -192,35 +195,51 @@ export default function Settings() {
           <label className="text-[11px] text-muted font-semibold block mb-1">API Secret <span className="font-normal">(leave blank to keep current)</span></label>
           <input className="input font-mono text-xs" type="password" value={form.cs_api_secret} onChange={e => setForm(f => ({ ...f, cs_api_secret: e.target.value }))} placeholder={data.api_key_set ? '(unchanged)' : 'Enter CoinSwitch API secret'} />
         </div>
+
+        <div className="flex items-center gap-3 pt-1">
+          <label className="text-[11px] text-muted font-semibold whitespace-nowrap">Key Validity (days)</label>
+          <input
+            className="input font-mono text-xs w-24"
+            type="number"
+            min="1"
+            value={form.api_key_validity_days}
+            onChange={e => setForm(f => ({ ...f, api_key_validity_days: parseInt(e.target.value) || 90 }))}
+          />
+          <p className="text-[11px] text-muted flex-1">How long the broker's keys stay valid. Expiry is recomputed automatically when this changes or when new keys are saved.</p>
+        </div>
+
         <div className="flex items-center gap-2 text-[12px] pt-1">
           <div className={`w-2 h-2 rounded-full flex-shrink-0 ${data.api_key_set ? 'bg-green' : 'bg-red'}`} />
           <span className={data.api_key_set ? 'text-green' : 'text-red'}>
             {data.api_key_set ? 'API key configured' : 'No API key set'}
           </span>
-          {data.api_key_set && data.api_key_expires && (
-            <span className="text-red font-mono ml-auto">⚠ Expires {data.api_key_expires} — regenerate before then</span>
+          {data.api_key_set && data.master_days_until_expiry != null && (
+            <span className={`font-mono ml-auto ${data.master_days_until_expiry <= 10 ? 'text-red' : data.master_days_until_expiry <= 30 ? 'text-amber-400' : 'text-green'}`}>
+              {data.master_days_until_expiry <= 0 ? '⚠ Expired' : `${data.master_days_until_expiry}d until expiry`}
+            </span>
           )}
-          {data.api_key_set && !data.api_key_expires && (
-            <span className="text-muted font-mono ml-auto">No expiry set — save new keys to set it</span>
+          {data.api_key_set && data.master_days_until_expiry == null && (
+            <span className="text-muted font-mono ml-auto">No key update recorded — save new keys to start tracking</span>
           )}
         </div>
+
         {data.api_key_set && (
           <div className="flex items-center gap-3">
-            <p className="text-[11px] text-muted flex-1">Expiry auto-resets to today + 90 days when you save new keys. You can also reset it manually. Telegram alert fires 1 day before expiry.</p>
+            <p className="text-[11px] text-muted flex-1">If you physically renewed the key but didn't change it here, reset the counter manually. Telegram alert fires 1 day before expiry.</p>
             <button
               onClick={async () => {
                 setResetingExpiry(true); setExpiryReset(false)
                 try {
                   const r = await fetch('/api/settings/reset-expiry', { method: 'POST', credentials: 'include' })
                   const j = await r.json()
-                  setData(d => d ? { ...d, api_key_expires: j.expiry } : d)
+                  setData(d => d ? { ...d, api_key_expires: j.expiry, master_days_until_expiry: j.days_until_expiry } : d)
                   setExpiryReset(true)
                 } finally { setResetingExpiry(false) }
               }}
               disabled={resetingExpiry}
               className="text-[11px] px-3 py-1.5 rounded border border-accent/50 text-accent hover:bg-accent/10 transition-colors disabled:opacity-40 whitespace-nowrap"
             >
-              {resetingExpiry ? '…' : expiryReset ? '✓ Expiry Reset' : 'Key Renewed — Reset Expiry'}
+              {resetingExpiry ? '…' : expiryReset ? '✓ Counter Reset' : 'Key Renewed — Reset Counter'}
             </button>
           </div>
         )}

@@ -49,6 +49,37 @@ def _send_telegram_alert(message: str):
         pass
 
 
+def _validity_days() -> int:
+    v = _env_get("API_KEY_VALIDITY_DAYS")
+    try:
+        return max(1, int(v)) if v else 90
+    except ValueError:
+        return 90
+
+
+def _days_until_expiry(updated_at: str) -> Optional[int]:
+    if not updated_at:
+        return None
+    try:
+        updated = date.fromisoformat(updated_at)
+        expiry = updated + timedelta(days=_validity_days())
+        return (expiry - date.today()).days
+    except ValueError:
+        return None
+
+
+def _recompute_master_expiry():
+    """Recompute COINSWITCH_API_EXPIRY from key_updated_at + validity_days."""
+    updated_at = _env_get("COINSWITCH_API_KEY_UPDATED_AT")
+    if not updated_at:
+        return
+    try:
+        expiry = (date.fromisoformat(updated_at) + timedelta(days=_validity_days())).isoformat()
+        _env_set("COINSWITCH_API_EXPIRY", expiry)
+    except ValueError:
+        pass
+
+
 def _check_api_expiry():
     """Alert via Telegram if master API key expires within 1 day."""
     expiry_str = _env_get("COINSWITCH_API_EXPIRY")
@@ -58,12 +89,13 @@ def _check_api_expiry():
         expiry = date.fromisoformat(expiry_str)
         days_left = (expiry - date.today()).days
         if days_left <= 1:
+            accs = _read_accs()
+            master_name = next((a["name"] for a in accs if a.get("is_master")), "Master")
             msg = (
                 f"⚠️ *CoinSwitch API Key Expiry Alert*\n\n"
-                f"Your master API key expires on *{expiry_str}* "
+                f"The API key for *{master_name}* (master account) expires on *{expiry_str}* "
                 f"({'today' if days_left <= 0 else 'tomorrow'}).\n\n"
-                f"Generate new keys at CoinSwitch DMA and update `.env` on the VM, "
-                f"then click *Reset Expiry* in Settings."
+                f"Update the key in *Settings → Master API Configuration*."
             )
             _send_telegram_alert(msg)
     except ValueError:
@@ -362,13 +394,17 @@ class AccInput(BaseModel):
 @app.get("/api/accounts")
 async def list_accounts(_=Depends(auth)):
     result = []
+    master_updated_at = _env_get("COINSWITCH_API_KEY_UPDATED_AT")
     for a in _read_accs():
         a = dict(a)
         masked = (a.get("api_key") or "")[:8] + "…" if a.get("api_key") else ""
         a["api_key_masked"] = masked
         a["is_master"] = bool(a.get("is_master", False))
+        updated_at = master_updated_at if a["is_master"] else a.get("key_updated_at", "")
+        a["days_until_expiry"] = _days_until_expiry(updated_at)
         a.pop("api_key", None)
         a.pop("api_secret", None)
+        a.pop("key_updated_at", None)
         result.append(a)
     return result
 
@@ -394,8 +430,11 @@ async def update_account(idx: int, a: AccInput, _=Depends(auth)):
         updated["api_key"]    = ""
         updated["api_secret"] = ""
     else:
-        if not updated["api_key"]:
+        if updated["api_key"]:
+            updated["key_updated_at"] = date.today().isoformat()
+        else:
             updated["api_key"] = accs[idx].get("api_key", "")
+            updated["key_updated_at"] = accs[idx].get("key_updated_at", "")
         if not updated["api_secret"]:
             updated["api_secret"] = accs[idx].get("api_secret", "")
     accs[idx] = updated
@@ -431,19 +470,25 @@ async def set_master(idx: int, _=Depends(auth)):
     new_secret = accs[idx].get("api_secret", "")
 
     # Give old master its .env key as a personal key so it keeps working
+    old_master_updated_at = _env_get("COINSWITCH_API_KEY_UPDATED_AT")
     if old_master_idx is not None and old_master_idx != idx and env_key:
-        accs[old_master_idx]["api_key"]    = env_key
-        accs[old_master_idx]["api_secret"] = env_secret
+        accs[old_master_idx]["api_key"]        = env_key
+        accs[old_master_idx]["api_secret"]     = env_secret
+        accs[old_master_idx]["key_updated_at"] = old_master_updated_at
 
     # Promote new master's personal key to .env
+    new_updated_at = accs[idx].get("key_updated_at", "") or date.today().isoformat()
     if new_key:
         _env_set("COINSWITCH_API_KEY", new_key)
     if new_secret:
         _env_set("COINSWITCH_API_SECRET", new_secret)
+    _env_set("COINSWITCH_API_KEY_UPDATED_AT", new_updated_at)
+    _recompute_master_expiry()
 
     # Clear new master's personal key — it uses .env from now on
-    accs[idx]["api_key"]    = ""
-    accs[idx]["api_secret"] = ""
+    accs[idx]["api_key"]        = ""
+    accs[idx]["api_secret"]     = ""
+    accs[idx].pop("key_updated_at", None)
 
     for i, a in enumerate(accs):
         a["is_master"] = (i == idx)
@@ -467,14 +512,16 @@ async def delete_account(idx: int, _=Depends(auth)):
 @app.get("/api/settings")
 async def get_settings(_=Depends(auth)):
     return {
-        "dry_run":         _env_get("DRY_RUN").lower() == "true",
-        "live_from":       _env_get("LIVE_FROM"),
-        "signal_mode":     _env_get("SIGNAL_MODE") or "image",
-        "alert_chat_id":   _env_get("TELEGRAM_ALERT_CHAT_ID"),
-        "source_channel_id": _env_get("TELEGRAM_CHANNEL_ID"),
-        "current_expiry":  _env_get("CURRENT_EXPIRY") or _env_get("LIVE_FROM"),
-        "api_key_set":     bool(_env_get("COINSWITCH_API_KEY")),
-        "api_key_expires": _env_get("COINSWITCH_API_EXPIRY") or None,
+        "dry_run":             _env_get("DRY_RUN").lower() == "true",
+        "live_from":           _env_get("LIVE_FROM"),
+        "signal_mode":         _env_get("SIGNAL_MODE") or "image",
+        "alert_chat_id":       _env_get("TELEGRAM_ALERT_CHAT_ID"),
+        "source_channel_id":   _env_get("TELEGRAM_CHANNEL_ID"),
+        "current_expiry":      _env_get("CURRENT_EXPIRY") or _env_get("LIVE_FROM"),
+        "api_key_validity_days": _validity_days(),
+        "api_key_set":         bool(_env_get("COINSWITCH_API_KEY")),
+        "api_key_expires":     _env_get("COINSWITCH_API_EXPIRY") or None,
+        "master_days_until_expiry": _days_until_expiry(_env_get("COINSWITCH_API_KEY_UPDATED_AT")),
     }
 
 
@@ -485,6 +532,7 @@ class SettingsInput(BaseModel):
     alert_chat_id: str
     source_channel_id: str = ""
     current_expiry: str = ""
+    api_key_validity_days: int = 90
     bot_token: str = ""
     cs_api_key: str = ""
     cs_api_secret: str = ""
@@ -492,7 +540,6 @@ class SettingsInput(BaseModel):
 
 @app.post("/api/settings")
 async def save_settings(s: SettingsInput, _=Depends(auth)):
-    from datetime import timedelta
     _env_set("DRY_RUN", "true" if s.dry_run else "false")
     _env_set("LIVE_FROM", s.live_from)
     _env_set("SIGNAL_MODE", s.signal_mode)
@@ -501,6 +548,8 @@ async def save_settings(s: SettingsInput, _=Depends(auth)):
         _env_set("TELEGRAM_CHANNEL_ID", s.source_channel_id)
     if s.current_expiry:
         _env_set("CURRENT_EXPIRY", s.current_expiry)
+    if s.api_key_validity_days and s.api_key_validity_days > 0:
+        _env_set("API_KEY_VALIDITY_DAYS", str(s.api_key_validity_days))
     if s.bot_token:
         _env_set("TELEGRAM_BOT_TOKEN", s.bot_token)
     if s.cs_api_key:
@@ -508,19 +557,23 @@ async def save_settings(s: SettingsInput, _=Depends(auth)):
     if s.cs_api_secret:
         _env_set("COINSWITCH_API_SECRET", s.cs_api_secret)
     if s.cs_api_key or s.cs_api_secret:
-        # New keys saved — auto-reset expiry to today + 90 days
-        _env_set("COINSWITCH_API_EXPIRY", (date.today() + timedelta(days=90)).isoformat())
+        _env_set("COINSWITCH_API_KEY_UPDATED_AT", date.today().isoformat())
+        _recompute_master_expiry()
+    elif s.api_key_validity_days and s.api_key_validity_days > 0:
+        # Validity days changed — recompute expiry without touching key_updated_at
+        _recompute_master_expiry()
     return {"ok": True, "note": "Restart bot for changes to take effect"}
 
 
 
 @app.post("/api/settings/reset-expiry")
 async def reset_api_expiry(_=Depends(auth)):
-    """Call this after saving new CoinSwitch API keys — sets expiry to today + 90 days."""
-    from datetime import timedelta
-    expiry = (date.today() + timedelta(days=90)).isoformat()
-    _env_set("COINSWITCH_API_EXPIRY", expiry)
-    return {"ok": True, "expiry": expiry}
+    """Reset key_updated_at to today and recompute expiry from validity_days."""
+    _env_set("COINSWITCH_API_KEY_UPDATED_AT", date.today().isoformat())
+    _recompute_master_expiry()
+    expiry = _env_get("COINSWITCH_API_EXPIRY")
+    days = _days_until_expiry(date.today().isoformat())
+    return {"ok": True, "expiry": expiry, "days_until_expiry": days}
 
 
 # ── Portfolio / positions / journal ───────────────────────────────────────────

@@ -320,7 +320,7 @@ export default function Accounts() {
             <table className="w-full text-sm">
               <thead>
                 <tr className="border-b border-border">
-                  {['Name', 'Live Balance', 'Multiplier', 'API Key', 'Status', ''].map(h => (
+                  {['Name', 'Live Balance', 'Multiplier', 'API Key', 'Expires In', 'Status', ''].map(h => (
                     <th key={h} className="text-left px-4 py-3 text-[10px] font-semibold text-muted uppercase tracking-widest whitespace-nowrap">{h}</th>
                   ))}
                 </tr>
@@ -359,6 +359,16 @@ export default function Accounts() {
                         {a.api_key_masked
                           ? <span className="font-mono text-[11px] bg-s3 text-muted px-2 py-0.5 rounded">{a.api_key_masked}</span>
                           : <span className="text-muted2 text-[12px]">— master key</span>
+                        }
+                      </td>
+                      <td className="px-4 py-3 font-mono text-[12px]">
+                        {a.days_until_expiry == null
+                          ? <span className="text-muted">—</span>
+                          : a.days_until_expiry <= 0
+                          ? <span className="text-red font-semibold">Expired</span>
+                          : <span className={a.days_until_expiry <= 10 ? 'text-red font-semibold' : a.days_until_expiry <= 30 ? 'text-amber-400' : 'text-green'}>
+                              {a.days_until_expiry}d
+                            </span>
                         }
                       </td>
                       <td className="px-4 py-3">
