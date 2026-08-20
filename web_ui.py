@@ -9,7 +9,7 @@ import os
 import sys
 import subprocess
 import uuid
-from datetime import datetime, date
+from datetime import datetime, date, timedelta
 from pathlib import Path
 from typing import Optional
 
@@ -568,7 +568,6 @@ async def save_settings(s: SettingsInput, _=Depends(auth)):
 
 @app.post("/api/settings/reset-expiry")
 async def reset_api_expiry(_=Depends(auth)):
-    """Reset key_updated_at to today and recompute expiry from validity_days."""
     _env_set("COINSWITCH_API_KEY_UPDATED_AT", date.today().isoformat())
     _recompute_master_expiry()
     expiry = _env_get("COINSWITCH_API_EXPIRY")
