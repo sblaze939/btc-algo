@@ -13,14 +13,29 @@ _CHAT_ID   = os.getenv("TELEGRAM_ALERT_CHAT_ID", "")
 _API_URL   = f"https://api.telegram.org/bot{_BOT_TOKEN}/sendMessage"
 
 
-def send_alert(message: str):
-    """Send a Telegram alert. Fails silently so it never crashes the bot."""
+def send_alert(message: str) -> int | None:
+    """Send a Telegram alert. Returns message_id for later deletion."""
     if not _BOT_TOKEN or not _CHAT_ID:
+        return None
+    try:
+        resp = requests.post(
+            _API_URL,
+            json={"chat_id": _CHAT_ID, "text": message, "parse_mode": "HTML"},
+            timeout=8,
+        )
+        return resp.json().get("result", {}).get("message_id")
+    except Exception:
+        return None
+
+
+def delete_alert(message_id: int) -> None:
+    """Delete a previously sent alert by message_id."""
+    if not _BOT_TOKEN or not _CHAT_ID or not message_id:
         return
     try:
         requests.post(
-            _API_URL,
-            json={"chat_id": _CHAT_ID, "text": message, "parse_mode": "HTML"},
+            f"https://api.telegram.org/bot{_BOT_TOKEN}/deleteMessage",
+            json={"chat_id": _CHAT_ID, "message_id": message_id},
             timeout=8,
         )
     except Exception:
@@ -82,9 +97,12 @@ def alert_order_failed(account: str, symbol: str, reason: str):
     )
 
 
-def alert_heartbeat(mode: str, accounts: list[str]):
-    send_alert(
-        f"💓 <b>Bot alive</b>\n"
+def alert_heartbeat(mode: str, accounts: list[str], prev_msg_id: int | None = None) -> int | None:
+    """Send heartbeat, deleting the previous one first. Returns new message_id."""
+    if prev_msg_id:
+        delete_alert(prev_msg_id)
+    return send_alert(
+        f"🟢 <b>KiraFX BTC Algo — Alive</b>\n"
         f"Mode: {mode}\n"
         f"Accounts: {', '.join(accounts)}"
     )

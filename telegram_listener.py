@@ -316,16 +316,17 @@ def parse_text_signal(text: str, inherit: dict = None) -> dict | None:
 # ── Main ──────────────────────────────────────────────────────────────────────
 
 async def heartbeat():
-    """Log every 10 min; send Telegram alert every hour."""
+    """Log every 10 min; send Telegram alert every 60 min (deletes previous)."""
     from coinswitch_trader import DRY_RUN
-    mode = "DRY RUN" if DRY_RUN else "LIVE TRADING"
-    tick     = 0
+    mode    = "DRY RUN" if DRY_RUN else "LIVE TRADING"
+    tick    = 0
+    prev_id = None
     while True:
         await asyncio.sleep(600)
         tick += 1
         log(f"Heartbeat — bot alive | mode={mode} | accounts={[a['name'] for a in ACCOUNTS]}")
         if tick % 6 == 0:  # every 60 min
-            alert_heartbeat(mode, [a["name"] for a in ACCOUNTS])
+            prev_id = alert_heartbeat(mode, [a["name"] for a in ACCOUNTS], prev_msg_id=prev_id)
 
 
 async def main():
