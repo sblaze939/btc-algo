@@ -25,7 +25,7 @@ load_dotenv()
 # Import CoinSwitch API helpers (Ed25519 auth + HTTP wrappers)
 sys.path.insert(0, str(Path(__file__).parent))
 try:
-    from coinswitch_trader import _get as _cs_get, _post as _cs_post
+    from coinswitch_trader import _get as _cs_get, _post as _cs_post, _parse_expiry as _cs_parse_expiry
     _CS_OK = True
 except Exception:
     _CS_OK = False
@@ -55,6 +55,35 @@ def _validity_days() -> int:
         return max(1, int(v)) if v else 90
     except ValueError:
         return 90
+
+
+def _round_mult(raw: float) -> float:
+    """Round multiplier to nearest 0.5 step, minimum 1.0: 0.8→1.0, 1.23→1.0, 1.78→1.5"""
+    whole = int(raw)
+    frac  = raw - whole
+    return max(1.0, float(whole) if frac < 0.5 else whole + 0.5)
+
+
+def _next_expiry_after(bybit_str: str) -> Optional[str]:
+    """BTC options expire every Friday — next expiry is exactly 7 days after current."""
+    import re as _re
+    MONTHS = {"JAN":1,"FEB":2,"MAR":3,"APR":4,"MAY":5,"JUN":6,
+              "JUL":7,"AUG":8,"SEP":9,"OCT":10,"NOV":11,"DEC":12}
+    if not bybit_str:
+        return None
+    m = _re.match(r"(\d{2})([A-Z]{3})(\d{2})", bybit_str)
+    if not m:
+        return None
+    day_s, mon, yr_s = m.groups()
+    mn = MONTHS.get(mon)
+    if not mn:
+        return None
+    try:
+        d = date(2000 + int(yr_s), mn, int(day_s))
+    except ValueError:
+        return None
+    nxt = d + timedelta(days=7)
+    return nxt.strftime("%-d %b %y")
 
 
 def _days_until_expiry(updated_at: str) -> Optional[int]:
@@ -395,6 +424,14 @@ class AccInput(BaseModel):
 async def list_accounts(_=Depends(auth)):
     result = []
     master_updated_at = _env_get("COINSWITCH_API_KEY_UPDATED_AT")
+    # Compute current expiry in Bybit format for is_waiting comparison
+    curr_expiry_raw = _env_get("CURRENT_EXPIRY") or _env_get("LIVE_FROM") or ""
+    curr_expiry_parsed = None
+    if curr_expiry_raw and _CS_OK:
+        try:
+            curr_expiry_parsed = _cs_parse_expiry(curr_expiry_raw)
+        except Exception:
+            pass
     for a in _read_accs():
         a = dict(a)
         masked = (a.get("api_key") or "")[:8] + "…" if a.get("api_key") else ""
@@ -402,6 +439,8 @@ async def list_accounts(_=Depends(auth)):
         a["is_master"] = bool(a.get("is_master", False))
         updated_at = master_updated_at if a["is_master"] else a.get("key_updated_at", "")
         a["days_until_expiry"] = _days_until_expiry(updated_at)
+        skip = a.get("skip_expiry")
+        a["is_waiting"] = bool(skip and curr_expiry_parsed and skip == curr_expiry_parsed)
         a.pop("api_key", None)
         a.pop("api_secret", None)
         a.pop("key_updated_at", None)
@@ -412,7 +451,17 @@ async def list_accounts(_=Depends(auth)):
 @app.post("/api/accounts")
 async def add_account(a: AccInput, _=Depends(auth)):
     accs = _read_accs()
-    accs.append(a.model_dump())
+    entry = a.model_dump()
+    # Auto-skip the current expiry — account joined mid-session, trades start from next expiry
+    current_expiry_raw = _env_get("CURRENT_EXPIRY") or _env_get("LIVE_FROM") or ""
+    auto_skip = None
+    if current_expiry_raw and _CS_OK:
+        try:
+            auto_skip = _cs_parse_expiry(current_expiry_raw)
+        except Exception:
+            pass
+    entry["skip_expiry"] = auto_skip
+    accs.append(entry)
     _write_accs(accs)
     return {"ok": True}
 
@@ -450,6 +499,7 @@ async def toggle_account(idx: int, _=Depends(auth)):
     accs[idx]["active"] = not accs[idx].get("active", True)
     _write_accs(accs)
     return {"ok": True, "active": accs[idx]["active"]}
+
 
 
 @app.patch("/api/accounts/{idx}/set-master")
@@ -518,6 +568,7 @@ async def get_settings(_=Depends(auth)):
         "alert_chat_id":       _env_get("TELEGRAM_ALERT_CHAT_ID"),
         "source_channel_id":   _env_get("TELEGRAM_CHANNEL_ID"),
         "current_expiry":      _env_get("CURRENT_EXPIRY") or _env_get("LIVE_FROM"),
+        "next_expiry":         _next_expiry_after(_cs_parse_expiry(_env_get("CURRENT_EXPIRY") or "") or "") if _CS_OK else None,
         "api_key_validity_days": _validity_days(),
         "api_key_set":         bool(_env_get("COINSWITCH_API_KEY")),
         "api_key_expires":     _env_get("COINSWITCH_API_EXPIRY") or None,

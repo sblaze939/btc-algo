@@ -3,9 +3,15 @@ import { api, Account, AccountInput, AccountDetail } from '../api'
 
 const BASE_SIZE = 50000
 
-function multiplier(size: number) {
-  return (size / BASE_SIZE).toFixed(2)
+function roundMult(size: number): string {
+  const raw   = size / BASE_SIZE
+  const whole = Math.floor(raw)
+  const frac  = raw - whole
+  const mult  = Math.max(1, frac < 0.5 ? whole : whole + 0.5)
+  return mult.toFixed(1) + '×'
 }
+
+type FilterStatus = 'active' | 'paused' | 'waiting'
 
 interface ModalProps {
   account: (Account & { idx: number }) | null
@@ -313,22 +319,28 @@ interface MasterConfirmState {
 }
 
 export default function Accounts() {
-  const [accounts, setAccounts] = useState<Account[]>([])
-  const [loading, setLoading] = useState(true)
-  const [showModal, setShowModal] = useState(false)
-  const [editTarget, setEditTarget] = useState<(Account & { idx: number }) | null>(null)
-  const [expandedIdx, setExpandedIdx] = useState<number | null>(null)
+  const [accounts,     setAccounts]     = useState<Account[]>([])
+  const [loading,      setLoading]      = useState(true)
+  const [showModal,    setShowModal]    = useState(false)
+  const [editTarget,   setEditTarget]   = useState<(Account & { idx: number }) | null>(null)
+  const [expandedIdx,  setExpandedIdx]  = useState<number | null>(null)
   const [liveBalances, setLiveBalances] = useState<Record<number, { equity: number; currency: string } | null>>({})
-  const [masterConfirm, setMasterConfirm] = useState<MasterConfirmState | null>(null)
-  const [settingMaster, setSettingMaster] = useState<number | null>(null)
-  const [deleteConfirm, setDeleteConfirm] = useState<{ idx: number; name: string } | null>(null)
-  const [fundTarget, setFundTarget] = useState<{ idx: number; name: string } | null>(null)
+  const [masterConfirm,  setMasterConfirm]  = useState<MasterConfirmState | null>(null)
+  const [settingMaster,  setSettingMaster]  = useState<number | null>(null)
+  const [deleteConfirm,  setDeleteConfirm]  = useState<{ idx: number; name: string } | null>(null)
+  const [fundTarget,     setFundTarget]     = useState<{ idx: number; name: string } | null>(null)
+  const [filter,         setFilter]         = useState<FilterStatus | null>(null)
+  const [nextExpiry,     setNextExpiry]     = useState<string | null>(null)
 
   async function load() {
     setLoading(true)
     try {
-      const accs = await api.accounts.list()
+      const [accs, settings] = await Promise.all([
+        api.accounts.list(),
+        api.settings.get(),
+      ])
       setAccounts(accs)
+      setNextExpiry(settings.next_expiry ?? null)
       accs.forEach((_, idx) => {
         api.accounts.detail(idx)
           .then(d => setLiveBalances(b => ({ ...b, [idx]: { equity: d.wallet.equity, currency: d.wallet.currency } })))
@@ -343,6 +355,7 @@ export default function Accounts() {
     await api.accounts.toggle(idx)
     load()
   }
+
 
   async function del(idx: number, name: string) {
     setDeleteConfirm({ idx, name })
@@ -379,9 +392,23 @@ export default function Accounts() {
     }
   }
 
+  // Derive status groups for chips
+  const waitingAccounts = accounts.filter(a => a.is_waiting)
+  const hasActive  = accounts.some(a => a.active && !a.is_waiting)
+  const hasPaused  = accounts.some(a => !a.active)
+  const hasWaiting = waitingAccounts.length > 0
+  const multipleStatuses = [hasActive, hasPaused, hasWaiting].filter(Boolean).length > 1
+
+  const statusOf = (a: Account): FilterStatus =>
+    a.is_waiting ? 'waiting' : a.active ? 'active' : 'paused'
+
+  const visibleAccounts = filter
+    ? accounts.filter(a => statusOf(a) === filter)
+    : accounts
+
   return (
-    <div className="p-4 sm:p-6">
-      <div className="flex items-end justify-between mb-4">
+    <div className="p-4 sm:p-6 space-y-4">
+      <div className="flex items-end justify-between">
         <div>
           <h1 className="text-[17px] font-bold">Accounts</h1>
           <p className="text-muted text-[12px] mt-0.5">All accounts receive the same signal — lots scaled by multiplier</p>
@@ -391,6 +418,48 @@ export default function Accounts() {
           Add Account
         </button>
       </div>
+
+      {/* Info banner — only when accounts are waiting for next expiry */}
+      {hasWaiting && (
+        <div className="flex items-center gap-3 border border-orange-400/20 bg-orange-400/5 rounded-card px-4 py-3 text-[12px] text-orange-200 leading-relaxed">
+          <span className="text-orange-400 text-[14px] flex-shrink-0">ℹ</span>
+          <span>
+            <span className="font-semibold text-orange-400">{waitingAccounts.length} account{waitingAccounts.length > 1 ? 's' : ''}</span>
+            {' '}were added mid-session and will skip signals for the current expiry.
+            {nextExpiry && (
+              <> They will begin trading automatically from the next expiry <span className="font-semibold text-orange-400">{nextExpiry}</span>.</>
+            )}
+            {' '}No action required.
+          </span>
+        </div>
+      )}
+
+      {/* Filter chips — only when multiple status types exist */}
+      {multipleStatuses && (
+        <div className="flex items-center gap-2 flex-wrap">
+          {[
+            { key: null,      label: 'All',          count: accounts.length,              cls: 'border-border2 text-tx bg-s3' },
+            hasActive  && { key: 'active'  as const, label: 'Active',      count: accounts.filter(a => statusOf(a) === 'active').length,  cls: 'border-green/30 text-green  bg-green/5' },
+            hasPaused  && { key: 'paused'  as const, label: 'Paused',      count: accounts.filter(a => statusOf(a) === 'paused').length,  cls: 'border-border2 text-muted   bg-s2'      },
+            hasWaiting && { key: 'waiting' as const, label: 'Next Expiry', count: waitingAccounts.length,                                 cls: 'border-orange-400/30 text-orange-400 bg-orange-400/5' },
+          ].filter(Boolean).map((chip: any) => {
+            const isSelected = filter === chip.key
+            return (
+              <button
+                key={String(chip.key)}
+                onClick={() => setFilter(isSelected ? null : chip.key)}
+                className={[
+                  'px-3 py-1 rounded-full text-[12px] font-semibold border transition-colors',
+                  isSelected ? chip.cls : 'border-border2 text-muted hover:text-tx',
+                ].join(' ')}
+              >
+                {chip.label}
+                <span className="ml-1.5 text-[10px] opacity-60">{chip.count}</span>
+              </button>
+            )
+          })}
+        </div>
+      )}
 
       <div className="bg-s1 border border-border rounded-card overflow-hidden">
         {loading ? (
@@ -408,33 +477,46 @@ export default function Accounts() {
                 </tr>
               </thead>
               <tbody>
-                {accounts.map((a, i) => (
+                {visibleAccounts.map((a, i) => {
+                  const realIdx = accounts.indexOf(a)
+                  const isWaiting = a.is_waiting
+                  const isPaused  = !a.active
+                  return (
                   <>
-                    <tr key={i} className="border-b border-border last:border-0 hover:bg-s2/50 transition-colors">
+                    <tr key={realIdx} className={[
+                      'border-b border-border last:border-0 hover:bg-s2/50 transition-colors',
+                      isWaiting ? 'border-l-2 border-l-orange-400/50' : '',
+                    ].join(' ')}>
                       <td className="px-4 py-3 font-semibold">
-                        <span className="flex items-center gap-2">
+                        <span className={`flex items-center gap-2 flex-wrap ${isPaused && !isWaiting ? 'text-muted' : ''}`}>
                           {a.name}
                           {a.is_master && (
                             <span className="text-[9px] font-bold uppercase tracking-widest px-1.5 py-0.5 rounded bg-accent/15 text-accent border border-accent/30">
                               Master
                             </span>
                           )}
+                          {isWaiting && (
+                            <span
+                              title={`Skipping ${a.skip_expiry} — joined mid-session. Trades start from ${nextExpiry ?? 'next expiry'} automatically.`}
+                              className="text-[9px] font-bold uppercase tracking-widest px-1.5 py-0.5 rounded bg-orange-400/12 text-orange-400 border border-orange-400/30 cursor-default"
+                            >
+                              next expiry
+                            </span>
+                          )}
                         </span>
                       </td>
-                      <td className="px-4 py-3 font-mono text-[13px]">
-                        {liveBalances[i] === undefined
+                      <td className={`px-4 py-3 font-mono text-[13px] ${isWaiting || isPaused ? 'text-muted' : ''}`}>
+                        {liveBalances[realIdx] === undefined
                           ? <span className="text-muted">…</span>
-                          : liveBalances[i] === null
+                          : liveBalances[realIdx] === null
                           ? <span className="text-muted">—</span>
-                          : `${liveBalances[i]!.currency === 'INR' ? '₹' : '$'}${liveBalances[i]!.equity.toLocaleString('en-IN', { maximumFractionDigits: 2 })}`}
+                          : `${liveBalances[realIdx]!.currency === 'INR' ? '₹' : '$'}${liveBalances[realIdx]!.equity.toLocaleString('en-IN', { maximumFractionDigits: 2 })}`}
                       </td>
                       <td className="px-4 py-3">
                         <span className="badge-data">
                           {(a as any).lot_multiplier != null
                             ? `${(a as any).lot_multiplier}× (manual)`
-                            : liveBalances[i]
-                            ? `${(liveBalances[i]!.equity / BASE_SIZE).toFixed(2)}×`
-                            : `${multiplier(a.account_size)}×`}
+                            : roundMult(a.account_size)}
                         </span>
                       </td>
                       <td className="px-4 py-3">
@@ -454,7 +536,7 @@ export default function Accounts() {
                         }
                       </td>
                       <td className="px-4 py-3">
-                        <button onClick={() => toggleActive(i)} className="flex items-center gap-1.5 cursor-pointer">
+                        <button onClick={() => toggleActive(realIdx)} className="flex items-center gap-1.5 cursor-pointer">
                           <div className={`relative w-9 h-5 rounded-full transition-colors ${a.active ? 'bg-green' : 'bg-s3'}`}>
                             <div className={`absolute top-0.5 w-4 h-4 bg-white rounded-full transition-all shadow ${a.active ? 'left-4' : 'left-0.5'}`} />
                           </div>
@@ -465,41 +547,42 @@ export default function Accounts() {
                       </td>
                       <td className="px-4 py-3 text-right whitespace-nowrap">
                         <button
-                          onClick={() => setExpandedIdx(expandedIdx === i ? null : i)}
-                          className={`text-[12px] px-2 py-1 rounded-md border transition-colors mr-2 ${expandedIdx === i ? 'bg-s3 text-tx border-border2' : 'bg-s2 border-border2 text-muted hover:text-tx'}`}
+                          onClick={() => setExpandedIdx(expandedIdx === realIdx ? null : realIdx)}
+                          className={`text-[12px] px-2 py-1 rounded-md border transition-colors mr-2 ${expandedIdx === realIdx ? 'bg-s3 text-tx border-border2' : 'bg-s2 border-border2 text-muted hover:text-tx'}`}
                         >
-                          {expandedIdx === i ? '▲ Hide' : '▼ Monitor'}
+                          {expandedIdx === realIdx ? '▲ Hide' : '▼ Monitor'}
                         </button>
                         {!a.is_master && (
                           <button
-                            onClick={() => requestSetMaster(i, a.name)}
-                            disabled={settingMaster === i}
+                            onClick={() => requestSetMaster(realIdx, a.name)}
+                            disabled={settingMaster === realIdx}
                             className="text-[12px] px-2 py-1 rounded-md border border-accent/40 text-accent hover:bg-accent/10 transition-colors mr-2 disabled:opacity-40"
                           >
-                            {settingMaster === i ? '…' : 'Set Master'}
+                            {settingMaster === realIdx ? '…' : 'Set Master'}
                           </button>
                         )}
                         <button
-                          onClick={() => setFundTarget({ idx: i, name: a.name })}
+                          onClick={() => setFundTarget({ idx: realIdx, name: a.name })}
                           className="text-[12px] px-2 py-1 rounded-md border border-green/40 text-green hover:bg-green/10 transition-colors mr-2"
                         >
                           Fund
                         </button>
-                        <button onClick={() => openEdit(a, i)} className="btn-ghost text-[12px] mr-2">Edit</button>
-                        <button onClick={() => del(i, a.name)} className="text-[12px] px-2 py-1 rounded-md bg-red/10 text-red hover:bg-red/20 transition-colors">✕</button>
+                        <button onClick={() => openEdit(a, realIdx)} className="btn-ghost text-[12px] mr-2">Edit</button>
+                        <button onClick={() => del(realIdx, a.name)} className="text-[12px] px-2 py-1 rounded-md bg-red/10 text-red hover:bg-red/20 transition-colors">✕</button>
                       </td>
                     </tr>
-                    {expandedIdx === i && <AccDetailPanel key={`detail-${i}`} idx={i} onClose={() => setExpandedIdx(null)} />}
+                    {expandedIdx === realIdx && <AccDetailPanel key={`detail-${realIdx}`} idx={realIdx} onClose={() => setExpandedIdx(null)} />}
                   </>
-                ))}
+                  )
+                })}
               </tbody>
             </table>
           </div>
         )}
       </div>
 
-      <p className="text-muted2 text-[11px] mt-3 leading-relaxed">
-        Base size ₹50,000 = 1×. Multiplier auto-computed from live wallet balance. Override per account if needed.
+      <p className="text-muted2 text-[11px] leading-relaxed">
+        Base size ₹50,000 = 1×. Multiplier rounds to nearest 0.5× step. Override per account if needed.
       </p>
 
       {showModal && (

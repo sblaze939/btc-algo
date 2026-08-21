@@ -11,7 +11,7 @@ from dotenv import load_dotenv
 
 from signal_parser import parse_signal, is_valid_signal, get_valid_signals
 from coinswitch_trader import (place_option_order, execute_close_all,
-                                execute_full_exit, log, MENTOR_BASE)
+                                execute_full_exit, log, MENTOR_BASE, _parse_expiry)
 from alerts import (alert_signal_image, alert_signal_text, alert_no_signal,
                     alert_heartbeat, alert_error)
 
@@ -31,16 +31,23 @@ client: TelegramClient = None
 
 # ── Account loader ────────────────────────────────────────────────────────────
 
+def _round_mult(raw: float) -> float:
+    """Round multiplier to nearest 0.5 step, minimum 1.0: 0.8→1.0, 1.23→1.0, 1.78→1.5"""
+    whole = int(raw)
+    frac  = raw - whole
+    return max(1.0, float(whole) if frac < 0.5 else whole + 0.5)
+
+
 def load_accounts() -> list[dict]:
     """
     Load trading accounts from accounts.json.
     Blank api_key/secret → falls back to .env values.
-    Multiplier = account_size / MENTOR_BASE (mentor baseline 50k).
+    Multiplier = round(account_size / MENTOR_BASE) to nearest 0.5.
     """
     path = Path("accounts.json")
     if not path.exists():
         log("accounts.json not found — using single account from .env")
-        return [{"name": "Main", "api_key": None, "api_secret": None, "multiplier": 1.0}]
+        return [{"name": "Main", "api_key": None, "api_secret": None, "multiplier": 1.0, "skip_expiry": None}]
 
     accounts = json.loads(path.read_text())
     result   = []
@@ -52,16 +59,17 @@ def load_accounts() -> list[dict]:
         size   = acc.get("account_size", MENTOR_BASE)
         # Explicit lot_multiplier overrides the size-based calculation
         if acc.get("lot_multiplier") is not None:
-            mult = round(float(acc["lot_multiplier"]), 4)
+            mult = _round_mult(float(acc["lot_multiplier"]))
             log(f"Account loaded: {acc.get('name')}  size={size}  multiplier={mult}x (manual override)")
         else:
-            mult = round(size / MENTOR_BASE, 4)
+            mult = _round_mult(size / MENTOR_BASE)
             log(f"Account loaded: {acc.get('name')}  size={size}  multiplier={mult}x")
         result.append({
-            "name":       acc.get("name", "Account"),
-            "api_key":    key,
-            "api_secret": secret,
-            "multiplier": mult,
+            "name":        acc.get("name", "Account"),
+            "api_key":     key,
+            "api_secret":  secret,
+            "multiplier":  mult,
+            "skip_expiry": acc.get("skip_expiry"),
         })
 
     if not result:
@@ -78,7 +86,16 @@ ACCOUNTS = load_accounts()
 
 async def execute_signal_for_all_accounts(signal: dict):
     """Dispatch signal to all accounts — handles normal, full_exit, and close_all."""
-    for acc in ACCOUNTS:
+    # Reload accounts fresh so runtime changes (skip_expiry, active toggle) apply immediately
+    accounts = load_accounts()
+    sig_expiry_parsed = _parse_expiry(signal.get("expiry_date", "") or "")
+    for acc in accounts:
+        # Skip if account is set to skip this expiry (late-joiner protection)
+        skip_expiry = acc.get("skip_expiry")
+        if skip_expiry and sig_expiry_parsed and skip_expiry == sig_expiry_parsed:
+            log(f"SKIP expiry {skip_expiry} — account joined mid-session, skipping this signal", acc["name"])
+            continue
+
         if signal.get("close_all"):
             log(f"Close all {signal['option_type']} positions", acc["name"])
             await asyncio.to_thread(

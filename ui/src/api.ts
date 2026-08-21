@@ -37,6 +37,8 @@ export interface Account {
   is_master: boolean
   api_key_masked: string
   days_until_expiry: number | null
+  skip_expiry?: string | null   // Bybit expiry code e.g. "28AUG26" — signals for this expiry are skipped
+  is_waiting?: boolean          // true when skip_expiry matches the current expiry (auto-cleared next expiry)
 }
 
 export interface AccountInput {
@@ -52,6 +54,7 @@ export interface Settings {
   dry_run: boolean
   live_from: string
   current_expiry: string
+  next_expiry: string | null
   signal_mode: string
   alert_chat_id: string
   source_channel_id: string

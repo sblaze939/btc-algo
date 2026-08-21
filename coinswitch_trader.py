@@ -4,6 +4,7 @@ Base URL: https://dma.coinswitch.co
 Auth: Ed25519 signature (pynacl)
 """
 import json
+import math
 import os
 import time
 import uuid
@@ -400,10 +401,10 @@ def place_option_order(signal: dict,
     raw_lots    = int(signal["lots"])
     expiry_hint = signal.get("expiry_date")
 
-    # Scale lots by account multiplier, minimum 1
-    lots = max(1, round(raw_lots * multiplier))
+    # Scale lots by account multiplier — floor so we never over-trade; minimum 1
+    lots = max(1, math.floor(raw_lots * multiplier))
     if multiplier != 1.0:
-        log(f"Lot scaling: mentor={raw_lots} × {multiplier}x = {lots} lots", account_name)
+        log(f"Lot scaling: mentor={raw_lots} × {multiplier}x = {lots} lots (floor)", account_name)
 
     # "exit" = buy-back to close a short position
     if action == "exit":
