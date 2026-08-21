@@ -79,6 +79,9 @@ export interface WalletBalance {
   equity: number
   wallet_balance: number
   unrealised_pnl: number
+  margin_used?: number
+  margin_rate?: number    // 0–1 fraction, e.g. 0.25 = 25% margin used
+  available?: number
 }
 
 export interface Position {
@@ -90,6 +93,7 @@ export interface Position {
   markPrice: string
   unrealisedPnl: string
   leverage: string
+  manual?: boolean
 }
 
 export interface AccountDetail {
@@ -138,6 +142,13 @@ export interface ManualPosition {
   markPrice: string
   manual:    true
   createdAt: string
+}
+
+export interface MismatchAccount {
+  account_idx: number
+  account: string
+  missing: Position[]   // positions master has that this child is missing
+  error: string | null
 }
 
 export interface TradeRecord {
@@ -233,6 +244,12 @@ export const api = {
                 req<{ ok: boolean; id: string }>('POST', '/api/portfolio/positions/manual', p),
       remove: (id: string) => req<{ ok: boolean }>('DELETE', `/api/portfolio/positions/manual/${id}`),
     },
+  },
+
+  mismatch: {
+    get:  () => req<{ mismatches: MismatchAccount[] }>('GET', '/api/portfolio/mismatch'),
+    sync: (b: { account_idx: number; symbol: string; side: string; size: string }) =>
+            req<{ ok: boolean; orderId?: string; error?: string }>('POST', '/api/portfolio/sync-position', b),
   },
 
   journal: {

@@ -1,5 +1,5 @@
-import { useEffect, useState } from 'react'
-import { api, Account, AccountDetail, Execution, OpenOrder, PlaceOrderInput, SymbolMatch } from '../api'
+import { useEffect, useRef, useState } from 'react'
+import { api, Account, AccountDetail, Execution, MismatchAccount, OpenOrder, PlaceOrderInput, SymbolMatch } from '../api'
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
 
@@ -245,19 +245,31 @@ function PlaceOrderModal({ idx, accountName, onClose, onPlaced }: {
 // ── Main page ─────────────────────────────────────────────────────────────────
 
 export default function Trading() {
-  const [accounts, setAccounts] = useState<Account[]>([])
-  const [selIdx, setSelIdx] = useState(0)
-  const [detail, setDetail] = useState<AccountDetail | null>(null)
-  const [orders, setOrders] = useState<OpenOrder[]>([])
-  const [execs, setExecs] = useState<Execution[]>([])
-  const [totalPnl, setTotalPnl] = useState(0)
-  const [loading, setLoading] = useState(false)
-  const [closing, setClosing] = useState<string | null>(null)
+  const [accounts,   setAccounts]   = useState<Account[]>([])
+  const [selIdx,     setSelIdx]     = useState(0)
+  const [detail,     setDetail]     = useState<AccountDetail | null>(null)
+  const [orders,     setOrders]     = useState<OpenOrder[]>([])
+  const [execs,      setExecs]      = useState<Execution[]>([])
+  const [totalPnl,   setTotalPnl]   = useState(0)
+  const [loading,    setLoading]    = useState(false)
+  const [closing,    setClosing]    = useState<string | null>(null)
   const [cancelling, setCancelling] = useState<string | null>(null)
-  const [showOrder, setShowOrder] = useState(false)
+  const [showOrder,  setShowOrder]  = useState(false)
+
+  // Mismatch
+  const [mismatches, setMismatches] = useState<MismatchAccount[]>([])
+  const [syncing,    setSyncing]    = useState<string | null>(null)   // symbol being synced
+  const [syncedSet,  setSyncedSet]  = useState<Set<string>>(new Set())
+
+  // Account dropdown
+  const [dropOpen,   setDropOpen]   = useState(false)
+  const [dropSearch, setDropSearch] = useState('')
+  const dropRef = useRef<HTMLDivElement>(null)
 
   useEffect(() => {
     api.accounts.list().then(setAccounts).catch(() => {})
+    // Mismatch check runs once on load (only meaningful when child accounts exist)
+    api.mismatch.get().then(r => setMismatches(r.mismatches)).catch(() => {})
   }, [])
 
   useEffect(() => {
@@ -266,6 +278,17 @@ export default function Trading() {
     const id = setInterval(load, 20_000)
     return () => clearInterval(id)
   }, [selIdx, accounts])
+
+  // Close dropdown on outside click
+  useEffect(() => {
+    function handleClick(e: MouseEvent) {
+      if (dropRef.current && !dropRef.current.contains(e.target as Node)) {
+        setDropOpen(false)
+      }
+    }
+    document.addEventListener('mousedown', handleClick)
+    return () => document.removeEventListener('mousedown', handleClick)
+  }, [])
 
   async function load() {
     setLoading(true)
@@ -281,6 +304,32 @@ export default function Trading() {
       setTotalPnl(ex.total_realised_pnl)
     } catch { /**/ } finally {
       setLoading(false)
+    }
+  }
+
+  async function syncPosition(accIdx: number, symbol: string, side: string, size: string) {
+    setSyncing(symbol)
+    try {
+      const r = await api.mismatch.sync({ account_idx: accIdx, symbol, side, size })
+      if (r.ok) {
+        setSyncedSet(prev => new Set([...prev, `${accIdx}::${symbol}`]))
+        // Refresh mismatch list
+        api.mismatch.get().then(r2 => setMismatches(r2.mismatches)).catch(() => {})
+      } else {
+        alert(`Sync failed: ${r.error}`)
+      }
+    } catch (e: any) {
+      alert(e.message ?? 'Sync failed')
+    } finally {
+      setSyncing(null)
+    }
+  }
+
+  async function syncAll(acc: MismatchAccount) {
+    for (const pos of acc.missing) {
+      const key = `${acc.account_idx}::${pos.symbol}`
+      if (syncedSet.has(key)) continue
+      await syncPosition(acc.account_idx, pos.symbol, pos.side, pos.size)
     }
   }
 
@@ -309,6 +358,13 @@ export default function Trading() {
   }
 
   const acct = accounts[selIdx]
+  const curMismatch = mismatches.find(m => m.account_idx === selIdx)
+  const pendingMismatches = curMismatch?.missing.filter(
+    p => !syncedSet.has(`${selIdx}::${p.symbol}`)
+  ) ?? []
+  const filteredAccounts = accounts.filter(a =>
+    a.name.toLowerCase().includes(dropSearch.toLowerCase())
+  )
 
   return (
     <div className="p-4 sm:p-6 space-y-4">
@@ -322,23 +378,77 @@ export default function Trading() {
         />
       )}
 
-      {/* Account tabs */}
-      <div className="flex items-center gap-2 flex-wrap">
-        {accounts.map((a, i) => (
+      {/* Account selector + Place Order */}
+      <div className="flex items-center gap-3">
+        {/* Dropdown selector */}
+        <div ref={dropRef} className="relative" style={{ maxWidth: 280 }}>
           <button
-            key={i}
-            onClick={() => setSelIdx(i)}
+            onClick={() => { setDropOpen(o => !o); setDropSearch('') }}
             className={[
-              'px-3 py-1.5 rounded-lg text-[12px] font-semibold border transition-colors',
-              selIdx === i
-                ? 'bg-accent text-bg border-accent'
-                : 'bg-s1 text-muted border-border hover:text-tx',
+              'flex items-center gap-2 px-3 py-1.5 rounded-lg text-[13px] font-semibold border transition-colors w-full',
+              dropOpen ? 'border-accent text-tx' : 'border-border text-tx hover:border-accent/60',
+              'bg-s1',
             ].join(' ')}
           >
-            {a.name}
-            {a.is_master && <span className="ml-1 text-[9px] opacity-60">MASTER</span>}
+            <span className="flex-1 text-left truncate">{acct?.name ?? '—'}</span>
+            {acct?.is_master && (
+              <span className="text-[9px] font-bold bg-accent/20 text-accent px-1.5 py-0.5 rounded">MASTER</span>
+            )}
+            {!acct?.is_master && pendingMismatches.length > 0 && (
+              <span className="text-[9px] font-bold bg-yellow-400/20 text-yellow-400 px-1.5 py-0.5 rounded">
+                ⚠ {pendingMismatches.length}
+              </span>
+            )}
+            <span className="text-muted text-[10px]">{dropOpen ? '▲' : '▼'}</span>
           </button>
-        ))}
+
+          {dropOpen && (
+            <div className="absolute top-full left-0 mt-1 w-64 bg-s2 border border-border rounded-xl shadow-xl z-20 overflow-hidden">
+              <input
+                autoFocus
+                value={dropSearch}
+                onChange={e => setDropSearch(e.target.value)}
+                placeholder="Search accounts…"
+                className="w-full px-3 py-2 bg-s1 border-b border-border text-[12px] text-tx placeholder:text-muted outline-none"
+              />
+              <div className="max-h-56 overflow-y-auto">
+                {filteredAccounts.length === 0 && (
+                  <div className="px-3 py-2 text-[12px] text-muted">No accounts found</div>
+                )}
+                {accounts.map((a, i) => {
+                  if (!a.name.toLowerCase().includes(dropSearch.toLowerCase())) return null
+                  const mm = mismatches.find(m => m.account_idx === i)
+                  const hasMismatch = !a.is_master && (mm?.missing.filter(
+                    p => !syncedSet.has(`${i}::${p.symbol}`)
+                  ).length ?? 0) > 0
+                  const posCount = i === selIdx ? detail?.positions.length ?? 0 : null
+                  return (
+                    <button
+                      key={i}
+                      onClick={() => { setSelIdx(i); setDropOpen(false) }}
+                      className={[
+                        'w-full flex items-center gap-2 px-3 py-2 text-[12px] font-semibold text-left transition-colors',
+                        i === selIdx ? 'text-accent bg-accent/5' : 'text-muted hover:bg-s1 hover:text-tx',
+                      ].join(' ')}
+                    >
+                      <span className={[
+                        'w-1.5 h-1.5 rounded-full flex-shrink-0',
+                        i === selIdx ? 'bg-accent' : hasMismatch ? 'bg-yellow-400' : 'bg-border',
+                      ].join(' ')} />
+                      <span className="flex-1 truncate">{a.name}</span>
+                      {a.is_master && <span className="text-[8px] font-bold bg-accent/20 text-accent px-1 py-0.5 rounded">MASTER</span>}
+                      {hasMismatch && <span className="text-[9px] text-yellow-400">⚠</span>}
+                      {posCount !== null && posCount > 0 && (
+                        <span className="text-[10px] text-muted">{posCount} pos</span>
+                      )}
+                    </button>
+                  )
+                })}
+              </div>
+            </div>
+          )}
+        </div>
+
         <button
           onClick={() => setShowOrder(true)}
           disabled={!accounts.length}
@@ -350,18 +460,120 @@ export default function Trading() {
 
       {/* Wallet stats */}
       {detail && (
-        <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
-          {[
-            { label: 'Equity', value: `${detail.wallet.equity.toFixed(2)} ${detail.wallet.currency}`, color: 'text-tx' },
-            { label: 'Wallet Balance', value: `${detail.wallet.wallet_balance.toFixed(2)} ${detail.wallet.currency}`, color: 'text-tx' },
-            { label: 'Unrealised PnL', value: `${fmt(detail.wallet.unrealised_pnl)} ${detail.wallet.currency}`, color: detail.wallet.unrealised_pnl >= 0 ? 'text-green' : 'text-red' },
-            { label: 'Realised PnL', value: `${fmt(totalPnl)} USDT`, color: totalPnl >= 0 ? 'text-green' : 'text-red' },
-          ].map(({ label, value, color }) => (
-            <div key={label} className="card p-4">
-              <div className="text-[10px] font-semibold text-muted uppercase tracking-widest mb-2">{label}</div>
-              <div className={`font-mono text-lg font-bold tabular-nums ${color}`}>{value}</div>
+        <>
+          <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
+            {/* Equity tile with delta vs wallet */}
+            <div className="card p-4">
+              <div className="text-[10px] font-semibold text-muted uppercase tracking-widest mb-2">Equity</div>
+              <div className="font-mono text-lg font-bold tabular-nums text-tx">
+                {detail.wallet.equity.toFixed(2)} {detail.wallet.currency}
+              </div>
+              {(() => {
+                const delta = detail.wallet.equity - detail.wallet.wallet_balance
+                const pct   = detail.wallet.wallet_balance !== 0
+                  ? Math.abs(delta / detail.wallet.wallet_balance * 100).toFixed(2)
+                  : '0.00'
+                if (Math.abs(delta) < 0.001) return (
+                  <div className="text-[10px] text-muted mt-1.5 font-mono">= wallet balance</div>
+                )
+                const sign  = delta >= 0 ? '+' : '−'
+                const color = delta >= 0 ? 'text-green' : 'text-red'
+                return (
+                  <div className={`text-[10px] font-mono tabular-nums mt-1.5 ${color}`}>
+                    {sign}{Math.abs(delta).toFixed(2)} ({sign}{pct}%) vs wallet
+                  </div>
+                )
+              })()}
             </div>
-          ))}
+
+            <div className="card p-4">
+              <div className="text-[10px] font-semibold text-muted uppercase tracking-widest mb-2">Wallet Balance</div>
+              <div className="font-mono text-lg font-bold tabular-nums text-tx">
+                {detail.wallet.wallet_balance.toFixed(2)} {detail.wallet.currency}
+              </div>
+              <div className="text-[10px] text-muted mt-1.5">settled cash</div>
+            </div>
+
+            <div className="card p-4">
+              <div className="text-[10px] font-semibold text-muted uppercase tracking-widest mb-2">Unrealised PnL</div>
+              <div className={`font-mono text-lg font-bold tabular-nums ${detail.wallet.unrealised_pnl >= 0 ? 'text-green' : 'text-red'}`}>
+                {fmt(detail.wallet.unrealised_pnl)} {detail.wallet.currency}
+              </div>
+            </div>
+
+            <div className="card p-4">
+              <div className="text-[10px] font-semibold text-muted uppercase tracking-widest mb-2">Realised PnL</div>
+              <div className={`font-mono text-lg font-bold tabular-nums ${totalPnl >= 0 ? 'text-green' : 'text-red'}`}>
+                {fmt(totalPnl)} USDT
+              </div>
+            </div>
+          </div>
+
+          {/* Margin utilisation */}
+          {(detail.wallet.margin_rate !== undefined && detail.wallet.margin_rate !== null) && (() => {
+            const rate     = detail.wallet.margin_rate ?? 0
+            const pct      = Math.min(100, Math.round(rate * 100))
+            const barColor = pct >= 80 ? 'bg-red' : pct >= 50 ? 'bg-yellow-400' : 'bg-green'
+            return (
+              <div className="card p-4">
+                <div className="flex items-center justify-between mb-2">
+                  <div className="text-[10px] font-semibold text-muted uppercase tracking-widest">Margin Utilisation</div>
+                  <div className={`font-mono text-[13px] font-bold tabular-nums ${pct >= 80 ? 'text-red' : pct >= 50 ? 'text-yellow-400' : 'text-green'}`}>{pct}%</div>
+                </div>
+                <div className="h-1.5 rounded-full bg-border overflow-hidden">
+                  <div className={`h-full rounded-full transition-all ${barColor}`} style={{ width: `${pct}%` }} />
+                </div>
+                <div className="flex justify-between text-[10px] text-muted mt-1.5 tabular-nums">
+                  <span>Used: {(detail.wallet.margin_used ?? 0).toFixed(2)} {detail.wallet.currency}</span>
+                  <span>Free: {(detail.wallet.available ?? 0).toFixed(2)} {detail.wallet.currency}</span>
+                </div>
+              </div>
+            )
+          })()}
+        </>
+      )}
+
+      {/* Mismatch banner — shown for child accounts that are missing master positions */}
+      {pendingMismatches.length > 0 && (
+        <div className="border border-yellow-400/30 bg-yellow-400/5 rounded-card p-4 space-y-3">
+          <div className="flex items-center justify-between">
+            <div className="text-[11px] font-bold text-yellow-400 flex items-center gap-2">
+              ⚠ Position Mismatch —
+              {pendingMismatches.length} position{pendingMismatches.length > 1 ? 's' : ''} missing vs master
+            </div>
+            <button
+              onClick={() => syncAll(curMismatch!)}
+              disabled={!!syncing}
+              className="text-[11px] px-3 py-1 rounded border border-yellow-400/50 text-yellow-400 hover:bg-yellow-400/10 transition-colors disabled:opacity-40"
+            >
+              {syncing ? 'Syncing…' : 'Sync All Missing'}
+            </button>
+          </div>
+          <div className="space-y-2">
+            {pendingMismatches.map(pos => {
+              const key = `${selIdx}::${pos.symbol}`
+              const isSyncing = syncing === pos.symbol
+              const isSynced  = syncedSet.has(key)
+              return (
+                <div key={pos.symbol} className="flex items-center gap-3 text-[12px] border-t border-yellow-400/10 pt-2">
+                  <span className="font-mono text-tx/80 flex-1">{pos.symbol}</span>
+                  <span className="text-red font-semibold">{pos.side}</span>
+                  <span className="text-muted tabular-nums">{pos.size} BTC</span>
+                  {isSynced ? (
+                    <span className="text-green text-[11px] font-semibold">✓ Synced</span>
+                  ) : (
+                    <button
+                      onClick={() => syncPosition(selIdx, pos.symbol, pos.side, pos.size)}
+                      disabled={!!syncing}
+                      className="text-[11px] px-2 py-0.5 rounded border border-yellow-400/40 text-yellow-400 hover:bg-yellow-400/10 transition-colors disabled:opacity-40"
+                    >
+                      {isSyncing ? '…' : 'Sync →'}
+                    </button>
+                  )}
+                </div>
+              )
+            })}
+          </div>
         </div>
       )}
 
@@ -390,7 +602,10 @@ export default function Trading() {
                   const pnl = parseFloat(p.unrealisedPnl)
                   return (
                     <tr key={i} className="border-b border-border/40 last:border-0">
-                      <td className="py-2 pr-3 font-mono text-tx/90">{p.symbol}</td>
+                      <td className="py-2 pr-3 font-mono text-tx/90">
+                        {p.symbol}
+                        {p.manual && <span className="ml-1.5 text-[9px] font-bold bg-accent/20 text-accent px-1 py-0.5 rounded uppercase tracking-wide">Manual</span>}
+                      </td>
                       <td className={`py-2 pr-3 font-semibold ${p.side === 'Sell' ? 'text-red' : 'text-green'}`}>{p.side}</td>
                       <td className="py-2 pr-3 tabular-nums">{p.size}</td>
                       <td className="py-2 pr-3 font-mono tabular-nums">{parseFloat(p.avgPrice).toFixed(2)}</td>
@@ -478,6 +693,7 @@ export default function Trading() {
               <tbody>
                 {execs.map((e, i) => {
                   const pnl = parseFloat(e.closedPnl)
+                  const pnlValid = !isNaN(pnl) && pnl !== 0
                   return (
                     <tr key={i} className="border-b border-border/40 last:border-0">
                       <td className="py-1.5 pr-3 font-mono text-tx/90">{e.symbol}</td>
@@ -485,8 +701,8 @@ export default function Trading() {
                       <td className="py-1.5 pr-3 text-muted">{e.orderType}</td>
                       <td className="py-1.5 pr-3 tabular-nums">{e.execQty}</td>
                       <td className="py-1.5 pr-3 font-mono tabular-nums text-accent">{parseFloat(e.execPrice).toFixed(2)}</td>
-                      <td className={`py-1.5 pr-3 font-mono tabular-nums font-semibold ${pnl === 0 ? 'text-muted' : pnl > 0 ? 'text-green' : 'text-red'}`}>
-                        {pnl === 0 ? '—' : fmt(pnl)}
+                      <td className={`py-1.5 pr-3 font-mono tabular-nums font-semibold ${pnlValid ? (pnl > 0 ? 'text-green' : 'text-red') : 'text-muted'}`}>
+                        {pnlValid ? fmt(pnl) : '—'}
                       </td>
                       <td className="py-1.5 pr-3 text-muted">{parseTs(e.execTime)}</td>
                     </tr>

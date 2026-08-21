@@ -288,7 +288,7 @@ export default function Dashboard() {
         <div className="card p-4 col-span-2 sm:col-span-1">
           <div className="text-[10px] font-semibold text-muted uppercase tracking-widest mb-2.5">Open Positions</div>
           <div className="font-mono text-xl font-bold text-tx tabular-nums">
-            {positions.filter(p => !('manual' in p)).length}
+            {positions.length}
           </div>
           <div className="text-[11px] text-muted mt-1.5">
             <Link to="/journal" className="hover:text-accent transition-colors">View journal →</Link>

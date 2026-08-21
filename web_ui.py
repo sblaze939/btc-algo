@@ -597,20 +597,36 @@ def _keys_for(acct: dict) -> tuple[str, str]:
     return k, s
 
 
+def _sf(v, default=0.0) -> float:
+    """Safe float — returns default for empty strings, None, or unparseable values."""
+    try:
+        return float(v)
+    except (ValueError, TypeError):
+        return default
+
+
 def _fetch_wallet(api_key: str, api_secret: str) -> dict:
     r = _cs_get("/v5/account/wallet-balance", {"accountType": "UNIFIED"}, api_key, api_secret)
-    coins = r.get("result", {}).get("list", [{}])[0].get("coin", [])
+    account = r.get("result", {}).get("list", [{}])[0]
+    coins   = account.get("coin", [])
     # CoinSwitch DMA uses INR-denominated accounts; fall back to USDT if not found
     coin = (
         next((c for c in coins if c.get("coin") == "INR"), None)
         or next((c for c in coins if c.get("coin") == "USDT"), None)
-        or (max(coins, key=lambda c: float(c.get("equity", 0))) if coins else {})
+        or (max(coins, key=lambda c: _sf(c.get("equity", 0))) if coins else {})
     )
+    # Margin utilisation — account-level fields from Bybit unified account
+    im_used  = _sf(account.get("totalInitialMargin", coin.get("totalOrderIM", 0)))
+    im_rate  = _sf(account.get("accountIMRate", 0))   # 0–1 fraction
+    avail    = _sf(account.get("totalAvailableBalance", coin.get("availableToWithdraw", 0)))
     return {
-        "currency":        coin.get("coin", "INR"),
-        "equity":          float(coin.get("equity", 0)),
-        "wallet_balance":  float(coin.get("walletBalance", 0)),
-        "unrealised_pnl":  float(coin.get("unrealisedPnl", 0)),
+        "currency":        coin.get("coin", "USDT"),
+        "equity":          _sf(coin.get("equity", 0)),
+        "wallet_balance":  _sf(coin.get("walletBalance", 0)),
+        "unrealised_pnl":  _sf(coin.get("unrealisedPnl", 0)),
+        "margin_used":     im_used,
+        "margin_rate":     im_rate,      # fraction, 0.25 = 25% used
+        "available":       avail,
     }
 
 
@@ -732,9 +748,29 @@ async def account_balance(idx: int, _=Depends(auth)):
     if not (0 <= idx < len(accs)):
         raise HTTPException(404, "Account not found")
     try:
+        acc_name = accs[idx]["name"]
         k, s = _keys_for(accs[idx])
         wallet = _fetch_wallet(k, s)
-        positions = _fetch_positions(k, s, accs[idx]["name"])
+        positions = _fetch_positions(k, s, acc_name)
+
+        # Merge manual positions that belong to this account.
+        # Match on name OR on the "master" sentinel for master accounts.
+        acc_is_master = accs[idx].get("is_master", False)
+        for mp in _read_manual_pos():
+            mp_acct = mp.get("account", "").lower()
+            if mp_acct == acc_name.lower() or (acc_is_master and mp_acct == "master"):
+                positions.append({
+                    "account":       acc_name,
+                    "symbol":        mp["symbol"],
+                    "side":          mp["side"],
+                    "size":          mp["size"],
+                    "avgPrice":      mp.get("avg_price", mp.get("avgPrice", "0")),
+                    "markPrice":     mp.get("markPrice", "0"),
+                    "unrealisedPnl": mp.get("unrealisedPnl", "0"),
+                    "leverage":      "1",
+                    "manual":        True,
+                })
+
         return {"wallet": wallet, "positions": positions}
     except Exception as e:
         raise HTTPException(502, f"API error: {e}")
@@ -825,7 +861,7 @@ async def get_executions(_=Depends(auth)):
         k, s = _env_get("COINSWITCH_API_KEY"), _env_get("COINSWITCH_API_SECRET")
         r = _cs_get("/v5/execution/list", {"category": "option", "limit": "50"}, k, s)
         execs = r.get("result", {}).get("list", [])
-        total_pnl = sum(float(e.get("closedPnl", 0)) for e in execs)
+        total_pnl = sum(_sf(e.get("closedPnl", 0)) for e in execs)
         return {"executions": execs, "total_realised_pnl": total_pnl}
     except Exception as e:
         raise HTTPException(502, f"API error: {e}")
@@ -858,7 +894,7 @@ async def account_executions(idx: int, limit: int = 30, _=Depends(auth)):
     try:
         r = _cs_get("/v5/execution/list", {"category": "option", "limit": str(limit)}, k, s)
         execs = r.get("result", {}).get("list", [])
-        total_pnl = sum(float(e.get("closedPnl", 0)) for e in execs)
+        total_pnl = sum(_sf(e.get("closedPnl", 0)) for e in execs)
         return {"executions": execs, "total_realised_pnl": total_pnl}
     except Exception as e:
         raise HTTPException(502, str(e))
@@ -1057,6 +1093,87 @@ async def delete_manual_position(pos_id: str, _=Depends(auth)):
     positions = [p for p in _read_manual_pos() if p.get("id") != pos_id]
     MANUAL_POS.write_text(json.dumps(positions, indent=2))
     return {"ok": True}
+
+
+# ── Position mismatch detection ───────────────────────────────────────────────
+
+@app.get("/api/portfolio/mismatch")
+async def portfolio_mismatch(_=Depends(auth)):
+    """
+    Compare master account open positions against each child account.
+    Returns a list of child accounts with any positions the master has that they are missing.
+    """
+    if not _CS_OK:
+        raise HTTPException(503, "CoinSwitch module unavailable")
+    try:
+        mk, ms = _env_get("COINSWITCH_API_KEY"), _env_get("COINSWITCH_API_SECRET")
+        master_positions = _fetch_positions(mk, ms, "master")
+    except Exception as e:
+        raise HTTPException(502, f"Failed to fetch master positions: {e}")
+
+    result = []
+    for i, acc in enumerate(_read_accs()):
+        if acc.get("is_master"):
+            continue
+        if not acc.get("api_key") or not acc.get("api_secret"):
+            continue
+        try:
+            child_pos = _fetch_positions(acc["api_key"], acc["api_secret"], acc["name"])
+            child_syms = {p["symbol"] for p in child_pos}
+            missing = [p for p in master_positions if p["symbol"] not in child_syms]
+            result.append({
+                "account_idx": i,
+                "account":     acc["name"],
+                "missing":     missing,
+                "error":       None,
+            })
+        except Exception as e:
+            result.append({
+                "account_idx": i,
+                "account":     acc["name"],
+                "missing":     [],
+                "error":       str(e),
+            })
+
+    return {"mismatches": result}
+
+
+class SyncPositionInput(BaseModel):
+    account_idx: int
+    symbol:      str
+    side:        str   # "Sell" (short the same way master did)
+    size:        str   # qty in BTC
+
+
+@app.post("/api/portfolio/sync-position")
+async def sync_position(req: SyncPositionInput, _=Depends(auth)):
+    """Place a market order on a child account to replicate a master position."""
+    if not _CS_OK:
+        raise HTTPException(503, "CoinSwitch module unavailable")
+    if not _live_allowed():
+        raise HTTPException(400, "Cannot sync: DRY_RUN=true or before LIVE_FROM date")
+    accs = _read_accs()
+    if req.account_idx < 0 or req.account_idx >= len(accs):
+        raise HTTPException(404, "Account not found")
+    acc = accs[req.account_idx]
+    k, s = _keys_for(acc)
+    body = {
+        "category":    "option",
+        "symbol":      req.symbol,
+        "side":        req.side,
+        "orderType":   "Market",
+        "qty":         req.size,
+        "timeInForce": "IOC",
+        "orderLinkId": str(uuid.uuid4()),
+    }
+    try:
+        result = _cs_post("/v5/order/create", body, k, s)
+        if result.get("retCode") == 0:
+            log(f"Sync order placed for {acc['name']}: {req.symbol} {req.side} {req.size}")
+            return {"ok": True, "orderId": result["result"]["orderId"]}
+        return {"ok": False, "error": result.get("retMsg", "Unknown error")}
+    except Exception as e:
+        raise HTTPException(502, str(e))
 
 
 # ── Serve React build ─────────────────────────────────────────────────────────

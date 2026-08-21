@@ -196,9 +196,20 @@ _MONTHS_MAP = {
     "jul":"Jul","aug":"Aug","sep":"Sep","oct":"Oct","nov":"Nov","dec":"Dec"
 }
 
+_NUM_TO_MON = {1:"Jan",2:"Feb",3:"Mar",4:"Apr",5:"May",6:"Jun",
+               7:"Jul",8:"Aug",9:"Sep",10:"Oct",11:"Nov",12:"Dec"}
+
 def _extract_expiry_from_text(text: str) -> str | None:
-    """Extract expiry hint from text: '21 aug', 'aug 7th', '7/aug', '21st aug', etc."""
+    """
+    Extract expiry hint from text. Handles:
+      Text month : '28 sep', '28th sep', 'sep 28', 'sep 28th', '28/sep', 'sep-28'
+                   'september 28', '28 sept' (partial match works)
+      Numeric DD/MM: '28/09', '28-09', '28/9', '28.9'  (India format, day first)
+    Returns a normalised '28 Sep' string for further validation.
+    """
     t = text.lower()
+
+    # ── Text month names (including abbreviated + partial like 'sept') ─────────
     for mon_key, mon_val in _MONTHS_MAP.items():
         m = re.search(rf"(\d{{1,2}})(?:st|nd|rd|th)?\s*[-/]?\s*{mon_key}", t)
         if m:
@@ -206,15 +217,37 @@ def _extract_expiry_from_text(text: str) -> str | None:
         m = re.search(rf"{mon_key}\s*[-/]?\s*(\d{{1,2}})(?:st|nd|rd|th)?", t)
         if m:
             return f"{m.group(1)} {mon_val}"
+
+    # ── Numeric DD/MM (separator: / - .) ──────────────────────────────────────
+    # Match DD[sep]MM (optionally followed by [sep]YY or [sep]YYYY)
+    # Constraint: day 1-31, month 1-12; day > 12 makes it unambiguous.
+    m = re.search(r"\b(\d{1,2})[/.\-](\d{1,2})(?:[/.\-]\d{2,4})?\b", t)
+    if m:
+        day_n, mon_n = int(m.group(1)), int(m.group(2))
+        # If first number ≤ 12 AND second > 12, it could be MM/DD — swap
+        if day_n <= 12 and mon_n > 12:
+            day_n, mon_n = mon_n, day_n
+        if 1 <= mon_n <= 12 and 1 <= day_n <= 31:
+            return f"{day_n} {_NUM_TO_MON[mon_n]}"
+
     return None
 
 
 def _validate_friday_expiry(expiry_str: str) -> str | None:
     """
-    Return a Friday expiry string for the given date.
-    If the date is already a Friday, return as-is.
-    If not a Friday, snap to the nearest Friday (preceding Friday preferred
-    for same-week context; following if preceding is in the past).
+    Return a confirmed Friday expiry string for the given date.
+
+    If the date is already a Friday → return as-is.
+
+    Typo-correction pass (before snapping):
+      Check the same day-of-month in the previous and next calendar months.
+      BTC options expire every Friday, and the same day-of-month cannot be a
+      Friday in two adjacent months (months are 28–31 days, never an exact
+      multiple of 7 — except February's 28-day edge case).  So if exactly one
+      adjacent month's same date lands on a Friday it is almost certainly a
+      mentor typo (e.g. "28 Sep" when Aug 28 is the expiry Friday) → use it.
+
+    Last resort → snap to the nearest Friday to the stated date.
     """
     from datetime import date as _date, timedelta as _td
     from coinswitch_trader import _parse_expiry
@@ -225,24 +258,50 @@ def _validate_friday_expiry(expiry_str: str) -> str | None:
     m = re.match(r"(\d{2})([A-Z]{3})(\d{2})", bybit)
     if not m:
         return None
-    day, mon, yr = m.groups()
+    day_s, mon, yr_s = m.groups()
     mn = MONTHS.get(mon)
     if not mn:
         return None
+    day_i = int(day_s)
+    yr_i  = 2000 + int(yr_s)
     try:
-        d = _date(2000 + int(yr), mn, int(day))
+        d = _date(yr_i, mn, day_i)
     except ValueError:
         return None
+
     if d.weekday() == 4:  # already Friday
         return expiry_str
-    # Snap to nearest Friday
-    days_since_friday = (d.weekday() - 4) % 7   # days since last Friday
-    days_to_friday    = (4 - d.weekday()) % 7    # days until next Friday
-    preceding = d - _td(days=days_since_friday)
-    following = d + _td(days=days_to_friday)
-    today = _date.today()
-    # Prefer preceding Friday if it's still in the future, else use following
-    nearest = preceding if preceding >= today else following
+
+    # ── Typo-correction pass ───────────────────────────────────────────────────
+    # Same day-of-month in prev month and next month
+    corrections: list[_date] = []
+    for delta in (-1, +1):
+        m2 = mn + delta
+        y2 = yr_i
+        if m2 == 0:
+            m2, y2 = 12, y2 - 1
+        elif m2 == 13:
+            m2, y2 = 1, y2 + 1
+        try:
+            d2 = _date(y2, m2, day_i)
+        except ValueError:
+            continue  # day doesn't exist in that month (e.g. 31 in April)
+        if d2.weekday() == 4:
+            corrections.append(d2)
+
+    if len(corrections) == 1:
+        corrected = corrections[0]
+        log(f"TYPO CORRECTION: '{expiry_str}' ({d.strftime('%A %d %b %y')}) → "
+            f"{corrected.strftime('%d %b %y')} (same date is a Friday in adjacent month)")
+        return corrected.strftime("%-d %b %y")
+
+    # ── Fallback: nearest Friday to stated date ────────────────────────────────
+    days_since = (d.weekday() - 4) % 7
+    days_until = (4 - d.weekday()) % 7
+    preceding  = d - _td(days=days_since)
+    following  = d + _td(days=days_until)
+    today      = _date.today()
+    nearest    = preceding if preceding >= today else following
     log(f"INFO: '{expiry_str}' is a {d.strftime('%A')} — snapping to nearest Friday {nearest.strftime('%d %b %y')}")
     return nearest.strftime("%-d %b %y")
 
