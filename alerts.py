@@ -62,7 +62,10 @@ def alert_signal_text(signals: list[dict], account_count: int):
         return
     lines = ["📊 <b>Signal received (text)</b>"]
     for s in signals:
-        lines.append(f"  {s['action'].upper()} {s['lots']}x {s['strike']} {s['option_type']}")
+        expiry  = s.get("expiry_date") or "nearest"
+        src     = s.get("expiry_source", "")
+        src_tag = f" · {src}" if src and src != "unknown" else ""
+        lines.append(f"  {s['action'].upper()} {s['lots']}x {s['strike']} {s['option_type']}  expiry: {expiry}{src_tag}")
     lines.append(f"Processing for {account_count} account(s)...")
     send_alert("\n".join(lines))
 

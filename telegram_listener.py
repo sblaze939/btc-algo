@@ -150,12 +150,24 @@ async def handle_new_message(event):
     # ── Text flow ─────────────────────────────────────────────────────────────
     if msg.text and SIGNAL_MODE in ("text", "both"):
         log(f"Text message: {msg.text[:200]}")
+
+        # Extract expiry from the FULL message first — so a date in a preamble
+        # like "For 28th Sept\n\nsell 5 lots..." applies to all signal segments.
+        global_expiry_raw = _extract_expiry_from_text(msg.text)
+        global_expiry     = _validate_friday_expiry(global_expiry_raw) if global_expiry_raw else None
+        if global_expiry:
+            log(f"Global expiry from full message: {global_expiry}")
+
         segments = re.split(r"\s+and\s+|[&\n]+|\bthen\b", msg.text, flags=re.IGNORECASE)
         first    = None
         valid    = []
         for segment in segments:
             parsed = parse_text_signal(segment.strip(), inherit=first)
             if parsed and is_valid_text_signal(parsed):
+                # Fill in global expiry if the segment itself had no date
+                if global_expiry and not parsed.get("expiry_date"):
+                    parsed["expiry_date"]   = global_expiry
+                    parsed["expiry_source"] = "explicit"
                 if first is None:
                     first = parsed
                 valid.append(parsed)
@@ -198,8 +210,13 @@ def _extract_expiry_from_text(text: str) -> str | None:
 
 
 def _validate_friday_expiry(expiry_str: str) -> str | None:
-    """Return expiry_str only if it resolves to a Friday; otherwise log warning and return None."""
-    from datetime import date as _date
+    """
+    Return a Friday expiry string for the given date.
+    If the date is already a Friday, return as-is.
+    If not a Friday, snap to the nearest Friday (preceding Friday preferred
+    for same-week context; following if preceding is in the past).
+    """
+    from datetime import date as _date, timedelta as _td
     from coinswitch_trader import _parse_expiry
     MONTHS = {"JAN":1,"FEB":2,"MAR":3,"APR":4,"MAY":5,"JUN":6,"JUL":7,"AUG":8,"SEP":9,"OCT":10,"NOV":11,"DEC":12}
     bybit = _parse_expiry(expiry_str)
@@ -216,10 +233,18 @@ def _validate_friday_expiry(expiry_str: str) -> str | None:
         d = _date(2000 + int(yr), mn, int(day))
     except ValueError:
         return None
-    if d.weekday() == 4:
+    if d.weekday() == 4:  # already Friday
         return expiry_str
-    log(f"WARNING: '{expiry_str}' is a {d.strftime('%A')}, not a Friday — ignoring date, using current expiry")
-    return None
+    # Snap to nearest Friday
+    days_since_friday = (d.weekday() - 4) % 7   # days since last Friday
+    days_to_friday    = (4 - d.weekday()) % 7    # days until next Friday
+    preceding = d - _td(days=days_since_friday)
+    following = d + _td(days=days_to_friday)
+    today = _date.today()
+    # Prefer preceding Friday if it's still in the future, else use following
+    nearest = preceding if preceding >= today else following
+    log(f"INFO: '{expiry_str}' is a {d.strftime('%A')} — snapping to nearest Friday {nearest.strftime('%d %b %y')}")
+    return nearest.strftime("%-d %b %y")
 
 
 def is_valid_text_signal(signal: dict) -> bool:
