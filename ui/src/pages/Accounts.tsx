@@ -406,6 +406,49 @@ export default function Accounts() {
     ? accounts.filter(a => statusOf(a) === filter)
     : accounts
 
+  // Full-page skeleton while loading
+  if (loading) return (
+    <div className="p-4 sm:p-6 space-y-4 animate-pulse">
+      {/* Header skeleton */}
+      <div className="flex items-end justify-between">
+        <div className="space-y-2">
+          <div className="h-5 w-32 bg-s3 rounded" />
+          <div className="h-3 w-64 bg-s3 rounded" />
+        </div>
+        <div className="h-8 w-32 bg-s3 rounded-lg" />
+      </div>
+      {/* Table skeleton */}
+      <div className="bg-s1 border border-border rounded-card overflow-hidden">
+        {/* Header row */}
+        <div className="flex gap-6 px-4 py-3 border-b border-border">
+          {[32, 24, 20, 28, 20, 16, 12].map((w, i) => (
+            <div key={i} className={`h-2.5 w-${w} bg-s3 rounded`} />
+          ))}
+        </div>
+        {/* Data rows */}
+        {[1, 2, 3, 4].map(r => (
+          <div key={r} className="flex items-center gap-6 px-4 py-4 border-b border-border last:border-0">
+            <div className="flex items-center gap-2 flex-1">
+              <div className="h-3.5 w-24 bg-s3 rounded" />
+              {r === 1 && <div className="h-4 w-14 bg-s3 rounded" />}
+            </div>
+            <div className="h-3.5 w-20 bg-s3 rounded" />
+            <div className="h-5 w-12 bg-s3 rounded" />
+            <div className="h-5 w-24 bg-s3 rounded" />
+            <div className="h-3.5 w-8 bg-s3 rounded" />
+            <div className="h-5 w-20 bg-s3 rounded-full" />
+            <div className="flex gap-2 ml-auto">
+              <div className="h-6 w-20 bg-s3 rounded-md" />
+              <div className="h-6 w-10 bg-s3 rounded-md" />
+              <div className="h-6 w-8 bg-s3 rounded-md" />
+              <div className="h-6 w-6 bg-s3 rounded-md" />
+            </div>
+          </div>
+        ))}
+      </div>
+    </div>
+  )
+
   return (
     <div className="p-4 sm:p-6 space-y-4">
       <div className="flex items-end justify-between">
@@ -462,9 +505,7 @@ export default function Accounts() {
       )}
 
       <div className="bg-s1 border border-border rounded-card overflow-hidden">
-        {loading ? (
-          <div className="text-center text-muted py-10 text-sm">Loading…</div>
-        ) : accounts.length === 0 ? (
+        {accounts.length === 0 ? (
           <div className="text-center text-muted py-10 text-sm">No accounts yet. Add one above.</div>
         ) : (
           <div className="overflow-x-auto">
