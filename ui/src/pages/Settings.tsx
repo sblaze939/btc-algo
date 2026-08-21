@@ -3,7 +3,7 @@ import { api, Settings as SettingsData, SettingsInput } from '../api'
 
 export default function Settings() {
   const [data, setData] = useState<SettingsData | null>(null)
-  const [form, setForm] = useState<SettingsInput>({ dry_run: true, live_from: '', signal_mode: 'image', alert_chat_id: '', bot_token: '', cs_api_key: '', cs_api_secret: '' })
+  const [form, setForm] = useState<SettingsInput>({ dry_run: true, live_from: '', trade_from_expiry: '', signal_mode: 'image', alert_chat_id: '', source_channel_id: '', bot_token: '', cs_api_key: '', cs_api_secret: '' })
   const [saving, setSaving] = useState(false)
   const [saved, setSaved] = useState(false)
   const [err, setErr] = useState('')
@@ -13,7 +13,7 @@ export default function Settings() {
   useEffect(() => {
     api.settings.get().then(s => {
       setData(s)
-      setForm({ dry_run: s.dry_run, live_from: s.live_from, signal_mode: s.signal_mode, alert_chat_id: s.alert_chat_id, bot_token: '', cs_api_key: '', cs_api_secret: '' })
+      setForm({ dry_run: s.dry_run, live_from: s.live_from, trade_from_expiry: s.trade_from_expiry || '', signal_mode: s.signal_mode, alert_chat_id: s.alert_chat_id, source_channel_id: s.source_channel_id || '', bot_token: '', cs_api_key: '', cs_api_secret: '' })
     })
   }, [])
 
@@ -67,6 +67,19 @@ export default function Settings() {
             onChange={e => setForm(f => ({ ...f, live_from: e.target.value }))}
           />
         </div>
+
+        <div className="flex items-center justify-between">
+          <div>
+            <div className="font-semibold text-sm">Trade From Expiry</div>
+            <div className="text-muted text-[12px] mt-0.5">Only trade signals whose expiry date is on or after this date. Leave blank to trade all expiries.</div>
+          </div>
+          <input
+            type="date"
+            className="input w-40"
+            value={form.trade_from_expiry || ''}
+            onChange={e => setForm(f => ({ ...f, trade_from_expiry: e.target.value }))}
+          />
+        </div>
       </section>
 
       {/* Signal Mode */}
@@ -90,11 +103,17 @@ export default function Settings() {
         </p>
       </section>
 
-      {/* Telegram Alerts */}
+      {/* Telegram Channels */}
       <section className="bg-s1 border border-border rounded-card p-5 space-y-3">
-        <h2 className="text-[10px] font-semibold text-muted uppercase tracking-widest">Telegram Alerts</h2>
+        <h2 className="text-[10px] font-semibold text-muted uppercase tracking-widest">Telegram Channels</h2>
         <div>
-          <label className="text-[11px] text-muted font-semibold block mb-1">Alert Channel ID</label>
+          <label className="text-[11px] text-muted font-semibold block mb-1">Signal Source Channel ID</label>
+          <p className="text-muted text-[11px] mb-1.5">The channel the bot listens to for trade signals. Restart bot after changing.</p>
+          <input className="input font-mono text-xs" value={form.source_channel_id || ''} onChange={e => setForm(f => ({ ...f, source_channel_id: e.target.value }))} placeholder="-1004459258917" />
+        </div>
+        <div>
+          <label className="text-[11px] text-muted font-semibold block mb-1">Log / Alerts Channel ID</label>
+          <p className="text-muted text-[11px] mb-1.5">Channel where order alerts, heartbeats, and errors are sent.</p>
           <input className="input font-mono text-xs" value={form.alert_chat_id} onChange={e => setForm(f => ({ ...f, alert_chat_id: e.target.value }))} />
         </div>
         <div>

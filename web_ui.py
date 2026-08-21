@@ -8,12 +8,13 @@ import json
 import os
 import sys
 import subprocess
+import time
 import uuid
-from datetime import datetime, date
+from datetime import datetime, date, timedelta
 from pathlib import Path
 from typing import Optional
 
-from fastapi import Cookie, Depends, FastAPI, HTTPException, Response
+from fastapi import Cookie, Depends, FastAPI, File, HTTPException, Response, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
@@ -25,7 +26,7 @@ load_dotenv()
 # Import CoinSwitch API helpers (Ed25519 auth + HTTP wrappers)
 sys.path.insert(0, str(Path(__file__).parent))
 try:
-    from coinswitch_trader import _get as _cs_get, _post as _cs_post
+    from coinswitch_trader import _get as _cs_get, _post as _cs_post, _parse_expiry as _cs_parse_expiry
     _CS_OK = True
 except Exception:
     _CS_OK = False
@@ -49,6 +50,66 @@ def _send_telegram_alert(message: str):
         pass
 
 
+def _validity_days() -> int:
+    v = _env_get("API_KEY_VALIDITY_DAYS")
+    try:
+        return max(1, int(v)) if v else 90
+    except ValueError:
+        return 90
+
+
+def _round_mult(raw: float) -> float:
+    """Round multiplier to nearest 0.5 step, minimum 1.0: 0.8→1.0, 1.23→1.0, 1.78→1.5"""
+    whole = int(raw)
+    frac  = raw - whole
+    return max(1.0, float(whole) if frac < 0.5 else whole + 0.5)
+
+
+def _next_expiry_after(bybit_str: str) -> Optional[str]:
+    """BTC options expire every Friday — next expiry is exactly 7 days after current."""
+    import re as _re
+    MONTHS = {"JAN":1,"FEB":2,"MAR":3,"APR":4,"MAY":5,"JUN":6,
+              "JUL":7,"AUG":8,"SEP":9,"OCT":10,"NOV":11,"DEC":12}
+    if not bybit_str:
+        return None
+    m = _re.match(r"(\d{2})([A-Z]{3})(\d{2})", bybit_str)
+    if not m:
+        return None
+    day_s, mon, yr_s = m.groups()
+    mn = MONTHS.get(mon)
+    if not mn:
+        return None
+    try:
+        d = date(2000 + int(yr_s), mn, int(day_s))
+    except ValueError:
+        return None
+    nxt = d + timedelta(days=7)
+    return nxt.strftime("%-d %b %y")
+
+
+def _days_until_expiry(updated_at: str) -> Optional[int]:
+    if not updated_at:
+        return None
+    try:
+        updated = date.fromisoformat(updated_at)
+        expiry = updated + timedelta(days=_validity_days())
+        return (expiry - date.today()).days
+    except ValueError:
+        return None
+
+
+def _recompute_master_expiry():
+    """Recompute COINSWITCH_API_EXPIRY from key_updated_at + validity_days."""
+    updated_at = _env_get("COINSWITCH_API_KEY_UPDATED_AT")
+    if not updated_at:
+        return
+    try:
+        expiry = (date.fromisoformat(updated_at) + timedelta(days=_validity_days())).isoformat()
+        _env_set("COINSWITCH_API_EXPIRY", expiry)
+    except ValueError:
+        pass
+
+
 def _check_api_expiry():
     """Alert via Telegram if master API key expires within 1 day."""
     expiry_str = _env_get("COINSWITCH_API_EXPIRY")
@@ -58,12 +119,13 @@ def _check_api_expiry():
         expiry = date.fromisoformat(expiry_str)
         days_left = (expiry - date.today()).days
         if days_left <= 1:
+            accs = _read_accs()
+            master_name = next((a["name"] for a in accs if a.get("is_master")), "Master")
             msg = (
                 f"⚠️ *CoinSwitch API Key Expiry Alert*\n\n"
-                f"Your master API key expires on *{expiry_str}* "
+                f"The API key for *{master_name}* (master account) expires on *{expiry_str}* "
                 f"({'today' if days_left <= 0 else 'tomorrow'}).\n\n"
-                f"Generate new keys at CoinSwitch DMA and update `.env` on the VM, "
-                f"then click *Reset Expiry* in Settings."
+                f"Update the key in *Settings → Master API Configuration*."
             )
             _send_telegram_alert(msg)
     except ValueError:
@@ -107,7 +169,7 @@ async def _lifespan(app):
     task.cancel()
 
 app = FastAPI(title="KiraFX Algos UI", lifespan=_lifespan)
-BOT_DIR = Path(__file__).parent
+BOT_DIR           = Path(__file__).parent
 UI_PASSWORD = os.getenv("UI_PASSWORD", "havenark2026")
 _SESSION = "kirafx_ok"
 
@@ -181,7 +243,7 @@ def _uptime() -> Optional[int]:
     if not log.exists():
         return None
     for line in reversed(log.read_text().splitlines()):
-        if "Starting BTC Options Algo" in line:
+        if "Starting BTC Options Bot" in line:
             try:
                 ts = datetime.strptime(line[1:20], "%Y-%m-%d %H:%M:%S")
                 return int((datetime.now() - ts).total_seconds())
@@ -215,15 +277,34 @@ def _systemctl(action: str):
     return r.returncode == 0
 
 
-def _systemd_available() -> bool:
-    r = subprocess.run(["systemctl", "is-enabled", "kirafx-bot"],
+def _systemd_active() -> bool:
+    """True only when kirafx-bot is actually managed and running under systemd."""
+    r = subprocess.run(["systemctl", "is-active", "kirafx-bot"],
                        capture_output=True, text=True)
-    return r.returncode == 0
+    return r.stdout.strip() == "active"
+
+
+def _wait_for_bot_death(timeout: float = 5.0):
+    """Poll until main.py process is gone (max timeout seconds), 200ms per check."""
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        r = subprocess.run("pgrep -f 'python.*main.py'", shell=True, capture_output=True)
+        if r.returncode != 0:
+            return
+        time.sleep(0.2)
+
+
+def _kill_bot():
+    """Kill any running main.py process and stop systemd unit if active."""
+    subprocess.run("pkill -TERM -f 'python main.py'", shell=True)
+    subprocess.run("pkill -TERM -f 'python3 main.py'", shell=True)
+    if _systemd_active():
+        _systemctl("stop")
+    _wait_for_bot_death()
 
 
 @app.post("/api/bot/action")
 async def bot_action(req: ActionReq, _=Depends(auth)):
-    use_systemd = _systemd_available()
     venv = f"source {BOT_DIR}/venv/bin/activate"
     log_out = f"{BOT_DIR}/logs/trades.log"
     start_cmd = f"cd {BOT_DIR} && {venv} && nohup python main.py >> {log_out} 2>&1 &"
@@ -231,30 +312,20 @@ async def bot_action(req: ActionReq, _=Depends(auth)):
     mode = "DRY RUN" if _env_get("DRY_RUN").lower() == "true" else "LIVE TRADING"
 
     if req.action == "stop":
-        if use_systemd:
-            _systemctl("stop")
-        else:
-            subprocess.run("pkill -f 'python main.py'", shell=True)
+        _kill_bot()
         _send_telegram_alert(f"🔴 *BTC Options Algo — Stopped*\nAlgo stopped via dashboard.\nMode was: {mode}")
         return {"ok": True}
 
     if req.action == "start":
         if _pid():
             return {"ok": False, "error": "Already running"}
-        if use_systemd:
-            _systemctl("start")
-        else:
-            subprocess.Popen(start_cmd, shell=True, executable="/bin/bash")
+        subprocess.Popen(start_cmd, shell=True, executable="/bin/bash")
         _send_telegram_alert(f"🟢 *BTC Options Algo — Started*\nAlgo is now running.\nMode: *{mode}*")
         return {"ok": True}
 
     if req.action == "restart":
-        if use_systemd:
-            _systemctl("restart")
-        else:
-            subprocess.run("pkill -f 'python main.py'", shell=True)
-            await asyncio.sleep(2)
-            subprocess.Popen(start_cmd, shell=True, executable="/bin/bash")
+        _kill_bot()
+        subprocess.Popen(start_cmd, shell=True, executable="/bin/bash")
         _send_telegram_alert(f"🔄 *BTC Options Algo — Restarted*\nAlgo restarted via dashboard.\nMode: *{mode}*")
         return {"ok": True}
 
@@ -291,6 +362,52 @@ async def log_stream(_=Depends(auth)):
                              headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"})
 
 
+@app.post("/api/logs/clear")
+async def clear_logs(_=Depends(auth)):
+    log = BOT_DIR / "logs" / "trades.log"
+    if log.exists():
+        log.write_text("")
+    return {"ok": True}
+
+
+# ── Logo ──────────────────────────────────────────────────────────────────────
+
+_LOGO_DIR = BOT_DIR / "static"
+_LOGO_EXTS = [".png", ".jpg", ".jpeg", ".webp", ".gif", ".svg"]
+
+
+def _logo_path() -> Optional[Path]:
+    for ext in _LOGO_EXTS:
+        p = _LOGO_DIR / f"logo{ext}"
+        if p.exists():
+            return p
+    return None
+
+
+@app.get("/api/logo")
+async def get_logo():
+    p = _logo_path()
+    if not p:
+        raise HTTPException(404, "No logo uploaded")
+    return FileResponse(p, headers={"Cache-Control": "no-cache"})
+
+
+@app.post("/api/logo")
+async def upload_logo(file: UploadFile = File(...), _=Depends(auth)):
+    _LOGO_DIR.mkdir(exist_ok=True)
+    ext = Path(file.filename or "logo.png").suffix.lower() or ".png"
+    if ext not in _LOGO_EXTS:
+        raise HTTPException(400, "Unsupported image type")
+    # Remove old logo files first
+    for old_ext in _LOGO_EXTS:
+        old = _LOGO_DIR / f"logo{old_ext}"
+        if old.exists():
+            old.unlink()
+    dest = _LOGO_DIR / f"logo{ext}"
+    dest.write_bytes(await file.read())
+    return {"ok": True}
+
+
 # ── Accounts ──────────────────────────────────────────────────────────────────
 
 ACCS = BOT_DIR / "accounts.json"
@@ -316,12 +433,37 @@ class AccInput(BaseModel):
 @app.get("/api/accounts")
 async def list_accounts(_=Depends(auth)):
     result = []
+    master_updated_at = _env_get("COINSWITCH_API_KEY_UPDATED_AT")
+    # Compute current expiry in Bybit format for is_waiting comparison
+    curr_expiry_raw = _env_get("CURRENT_EXPIRY") or _env_get("LIVE_FROM") or ""
+    curr_expiry_parsed = None
+    if curr_expiry_raw and _CS_OK:
+        try:
+            curr_expiry_parsed = _cs_parse_expiry(curr_expiry_raw)
+        except Exception:
+            pass
     for a in _read_accs():
         a = dict(a)
         masked = (a.get("api_key") or "")[:8] + "…" if a.get("api_key") else ""
         a["api_key_masked"] = masked
+        a["is_master"] = bool(a.get("is_master", False))
+        updated_at = master_updated_at if a["is_master"] else a.get("key_updated_at", "")
+        a["days_until_expiry"] = _days_until_expiry(updated_at)
+        # Compute ISO expiry date for frontend display
+        if updated_at:
+            try:
+                from datetime import date as _date, timedelta as _td
+                _exp = _date.fromisoformat(updated_at) + _td(days=_validity_days())
+                a["api_key_expires"] = _exp.isoformat()
+            except Exception:
+                a["api_key_expires"] = None
+        else:
+            a["api_key_expires"] = None
+        skip = a.get("skip_expiry")
+        a["is_waiting"] = bool(skip and curr_expiry_parsed and skip == curr_expiry_parsed)
         a.pop("api_key", None)
         a.pop("api_secret", None)
+        a.pop("key_updated_at", None)
         result.append(a)
     return result
 
@@ -329,7 +471,19 @@ async def list_accounts(_=Depends(auth)):
 @app.post("/api/accounts")
 async def add_account(a: AccInput, _=Depends(auth)):
     accs = _read_accs()
-    accs.append(a.model_dump())
+    entry = a.model_dump()
+    # Auto-skip the current expiry — account joined mid-session, trades start from next expiry
+    current_expiry_raw = _env_get("CURRENT_EXPIRY") or _env_get("LIVE_FROM") or ""
+    auto_skip = None
+    if current_expiry_raw and _CS_OK:
+        try:
+            auto_skip = _cs_parse_expiry(current_expiry_raw)
+        except Exception:
+            pass
+    entry["skip_expiry"] = auto_skip
+    if entry.get("api_key"):
+        entry["key_updated_at"] = date.today().isoformat()
+    accs.append(entry)
     _write_accs(accs)
     return {"ok": True}
 
@@ -340,10 +494,20 @@ async def update_account(idx: int, a: AccInput, _=Depends(auth)):
     if not (0 <= idx < len(accs)):
         raise HTTPException(404, "Not found")
     updated = a.model_dump()
-    if not updated["api_key"]:
-        updated["api_key"] = accs[idx].get("api_key", "")
-    if not updated["api_secret"]:
-        updated["api_secret"] = accs[idx].get("api_secret", "")
+    is_master = accs[idx].get("is_master", False)
+    updated["is_master"] = is_master
+    if is_master:
+        # Master account keys are managed exclusively through Settings
+        updated["api_key"]    = ""
+        updated["api_secret"] = ""
+    else:
+        if updated["api_key"]:
+            updated["key_updated_at"] = date.today().isoformat()
+        else:
+            updated["api_key"] = accs[idx].get("api_key", "")
+            updated["key_updated_at"] = accs[idx].get("key_updated_at", "")
+        if not updated["api_secret"]:
+            updated["api_secret"] = accs[idx].get("api_secret", "")
     accs[idx] = updated
     _write_accs(accs)
     return {"ok": True}
@@ -357,6 +521,52 @@ async def toggle_account(idx: int, _=Depends(auth)):
     accs[idx]["active"] = not accs[idx].get("active", True)
     _write_accs(accs)
     return {"ok": True, "active": accs[idx]["active"]}
+
+
+
+@app.patch("/api/accounts/{idx}/set-master")
+async def set_master(idx: int, _=Depends(auth)):
+    accs = _read_accs()
+    if not (0 <= idx < len(accs)):
+        raise HTTPException(404, "Not found")
+
+    previous = next((a["name"] for a in accs if a.get("is_master")), None)
+    old_master_idx = next((i for i, a in enumerate(accs) if a.get("is_master")), None)
+
+    # Current .env keys (belong to current master)
+    env_key    = _env_get("COINSWITCH_API_KEY")
+    env_secret = _env_get("COINSWITCH_API_SECRET")
+
+    # New master's personal key (if any) moves to .env
+    new_key    = accs[idx].get("api_key", "")
+    new_secret = accs[idx].get("api_secret", "")
+
+    # Give old master its .env key as a personal key so it keeps working
+    old_master_updated_at = _env_get("COINSWITCH_API_KEY_UPDATED_AT")
+    if old_master_idx is not None and old_master_idx != idx and env_key:
+        accs[old_master_idx]["api_key"]        = env_key
+        accs[old_master_idx]["api_secret"]     = env_secret
+        accs[old_master_idx]["key_updated_at"] = old_master_updated_at
+
+    # Promote new master's personal key to .env
+    new_updated_at = accs[idx].get("key_updated_at", "") or date.today().isoformat()
+    if new_key:
+        _env_set("COINSWITCH_API_KEY", new_key)
+    if new_secret:
+        _env_set("COINSWITCH_API_SECRET", new_secret)
+    _env_set("COINSWITCH_API_KEY_UPDATED_AT", new_updated_at)
+    _recompute_master_expiry()
+
+    # Clear new master's personal key — it uses .env from now on
+    accs[idx]["api_key"]        = ""
+    accs[idx]["api_secret"]     = ""
+    accs[idx].pop("key_updated_at", None)
+
+    for i, a in enumerate(accs):
+        a["is_master"] = (i == idx)
+
+    _write_accs(accs)
+    return {"ok": True, "previous_master": previous}
 
 
 @app.delete("/api/accounts/{idx}")
@@ -374,20 +584,30 @@ async def delete_account(idx: int, _=Depends(auth)):
 @app.get("/api/settings")
 async def get_settings(_=Depends(auth)):
     return {
-        "dry_run": _env_get("DRY_RUN").lower() == "true",
-        "live_from": _env_get("LIVE_FROM"),
-        "signal_mode": _env_get("SIGNAL_MODE") or "image",
-        "alert_chat_id": _env_get("TELEGRAM_ALERT_CHAT_ID"),
-        "api_key_set": bool(_env_get("COINSWITCH_API_KEY")),
-        "api_key_expires": _env_get("COINSWITCH_API_EXPIRY") or None,
+        "dry_run":             _env_get("DRY_RUN").lower() == "true",
+        "live_from":           _env_get("LIVE_FROM"),
+        "trade_from_expiry":   _env_get("TRADE_FROM_EXPIRY") or "",
+        "signal_mode":         _env_get("SIGNAL_MODE") or "image",
+        "alert_chat_id":       _env_get("TELEGRAM_ALERT_CHAT_ID"),
+        "source_channel_id":   _env_get("TELEGRAM_CHANNEL_ID"),
+        "current_expiry":      _env_get("CURRENT_EXPIRY") or _env_get("LIVE_FROM"),
+        "next_expiry":         _next_expiry_after(_cs_parse_expiry(_env_get("CURRENT_EXPIRY") or "") or "") if _CS_OK else None,
+        "api_key_validity_days": _validity_days(),
+        "api_key_set":         bool(_env_get("COINSWITCH_API_KEY")),
+        "api_key_expires":     _env_get("COINSWITCH_API_EXPIRY") or None,
+        "master_days_until_expiry": _days_until_expiry(_env_get("COINSWITCH_API_KEY_UPDATED_AT")),
     }
 
 
 class SettingsInput(BaseModel):
     dry_run: bool
-    live_from: str
+    live_from: str = ""
+    trade_from_expiry: str = ""
     signal_mode: str
     alert_chat_id: str
+    source_channel_id: str = ""
+    current_expiry: str = ""
+    api_key_validity_days: int = 90
     bot_token: str = ""
     cs_api_key: str = ""
     cs_api_secret: str = ""
@@ -395,11 +615,17 @@ class SettingsInput(BaseModel):
 
 @app.post("/api/settings")
 async def save_settings(s: SettingsInput, _=Depends(auth)):
-    from datetime import timedelta
     _env_set("DRY_RUN", "true" if s.dry_run else "false")
     _env_set("LIVE_FROM", s.live_from)
+    _env_set("TRADE_FROM_EXPIRY", s.trade_from_expiry)
     _env_set("SIGNAL_MODE", s.signal_mode)
     _env_set("TELEGRAM_ALERT_CHAT_ID", s.alert_chat_id)
+    if s.source_channel_id:
+        _env_set("TELEGRAM_CHANNEL_ID", s.source_channel_id)
+    if s.current_expiry:
+        _env_set("CURRENT_EXPIRY", s.current_expiry)
+    if s.api_key_validity_days and s.api_key_validity_days > 0:
+        _env_set("API_KEY_VALIDITY_DAYS", str(s.api_key_validity_days))
     if s.bot_token:
         _env_set("TELEGRAM_BOT_TOKEN", s.bot_token)
     if s.cs_api_key:
@@ -407,18 +633,22 @@ async def save_settings(s: SettingsInput, _=Depends(auth)):
     if s.cs_api_secret:
         _env_set("COINSWITCH_API_SECRET", s.cs_api_secret)
     if s.cs_api_key or s.cs_api_secret:
-        # New keys saved — auto-reset expiry to today + 90 days
-        _env_set("COINSWITCH_API_EXPIRY", (date.today() + timedelta(days=90)).isoformat())
+        _env_set("COINSWITCH_API_KEY_UPDATED_AT", date.today().isoformat())
+        _recompute_master_expiry()
+    elif s.api_key_validity_days and s.api_key_validity_days > 0:
+        # Validity days changed — recompute expiry without touching key_updated_at
+        _recompute_master_expiry()
     return {"ok": True, "note": "Restart bot for changes to take effect"}
+
 
 
 @app.post("/api/settings/reset-expiry")
 async def reset_api_expiry(_=Depends(auth)):
-    """Call this after saving new CoinSwitch API keys — sets expiry to today + 90 days."""
-    from datetime import timedelta
-    expiry = (date.today() + timedelta(days=90)).isoformat()
-    _env_set("COINSWITCH_API_EXPIRY", expiry)
-    return {"ok": True, "expiry": expiry}
+    _env_set("COINSWITCH_API_KEY_UPDATED_AT", date.today().isoformat())
+    _recompute_master_expiry()
+    expiry = _env_get("COINSWITCH_API_EXPIRY")
+    days = _days_until_expiry(date.today().isoformat())
+    return {"ok": True, "expiry": expiry, "days_until_expiry": days}
 
 
 # ── Portfolio / positions / journal ───────────────────────────────────────────
@@ -443,20 +673,36 @@ def _keys_for(acct: dict) -> tuple[str, str]:
     return k, s
 
 
+def _sf(v, default=0.0) -> float:
+    """Safe float — returns default for empty strings, None, or unparseable values."""
+    try:
+        return float(v)
+    except (ValueError, TypeError):
+        return default
+
+
 def _fetch_wallet(api_key: str, api_secret: str) -> dict:
     r = _cs_get("/v5/account/wallet-balance", {"accountType": "UNIFIED"}, api_key, api_secret)
-    coins = r.get("result", {}).get("list", [{}])[0].get("coin", [])
+    account = r.get("result", {}).get("list", [{}])[0]
+    coins   = account.get("coin", [])
     # CoinSwitch DMA uses INR-denominated accounts; fall back to USDT if not found
     coin = (
         next((c for c in coins if c.get("coin") == "INR"), None)
         or next((c for c in coins if c.get("coin") == "USDT"), None)
-        or (max(coins, key=lambda c: float(c.get("equity", 0))) if coins else {})
+        or (max(coins, key=lambda c: _sf(c.get("equity", 0))) if coins else {})
     )
+    # Margin utilisation — account-level fields from Bybit unified account
+    im_used  = _sf(account.get("totalInitialMargin", coin.get("totalOrderIM", 0)))
+    im_rate  = _sf(account.get("accountIMRate", 0))   # 0–1 fraction
+    avail    = _sf(account.get("totalAvailableBalance", coin.get("availableToWithdraw", 0)))
     return {
-        "currency":        coin.get("coin", "INR"),
-        "equity":          float(coin.get("equity", 0)),
-        "wallet_balance":  float(coin.get("walletBalance", 0)),
-        "unrealised_pnl":  float(coin.get("unrealisedPnl", 0)),
+        "currency":        coin.get("coin", "USDT"),
+        "equity":          _sf(coin.get("equity", 0)),
+        "wallet_balance":  _sf(coin.get("walletBalance", 0)),
+        "unrealised_pnl":  _sf(coin.get("unrealisedPnl", 0)),
+        "margin_used":     im_used,
+        "margin_rate":     im_rate,      # fraction, 0.25 = 25% used
+        "available":       avail,
     }
 
 
@@ -488,6 +734,61 @@ async def portfolio_balance(_=Depends(auth)):
         return _fetch_wallet(k, s)
     except Exception as e:
         raise HTTPException(502, f"API error: {e}")
+
+
+class FundsTransferInput(BaseModel):
+    amount: float
+    direction: str  # "IN" = Spot Wallet (INR) → HFT/DMA wallet (USDT at ₹94/USDT); "OUT" = reverse
+
+
+@app.post("/api/funds/transfer")
+async def funds_transfer(req: FundsTransferInput, _=Depends(auth)):
+    if not _CS_OK:
+        raise HTTPException(503, "CoinSwitch module unavailable — run: pip install pynacl")
+    if req.direction not in ("IN", "OUT"):
+        raise HTTPException(400, "direction must be IN or OUT")
+    if req.amount <= 0:
+        raise HTTPException(400, "amount must be positive")
+    try:
+        import uuid as _uuid
+        k, s = _env_get("COINSWITCH_API_KEY"), _env_get("COINSWITCH_API_SECRET")
+        result = _cs_post("/dma/api/v1/funds/transfer", {
+            "client_txn_id": str(_uuid.uuid4()),
+            "direction": req.direction,
+            "amount": req.amount,
+            "quote_asset": "INR",   # required for INR accounts; CoinSwitch converts at ~₹94/USDT
+        }, k, s)
+        balance = _fetch_wallet(k, s)
+        return {"ok": True, "transfer_result": result, "trading_balance": balance}
+    except Exception as e:
+        raise HTTPException(502, f"Transfer failed: {e}")
+
+
+@app.post("/api/accounts/{idx}/transfer")
+async def account_transfer(idx: int, req: FundsTransferInput, _=Depends(auth)):
+    """Transfer funds between Spot Wallet (INR) and HFT/DMA wallet for a specific account."""
+    if not _CS_OK:
+        raise HTTPException(503, "CoinSwitch module unavailable — run: pip install pynacl")
+    if req.direction not in ("IN", "OUT"):
+        raise HTTPException(400, "direction must be IN or OUT")
+    if req.amount <= 0:
+        raise HTTPException(400, "amount must be positive")
+    accs = _read_accs()
+    if idx < 0 or idx >= len(accs):
+        raise HTTPException(404, "Account not found")
+    try:
+        import uuid as _uuid
+        k, s = _keys_for(accs[idx])
+        result = _cs_post("/dma/api/v1/funds/transfer", {
+            "client_txn_id": str(_uuid.uuid4()),
+            "direction": req.direction,
+            "amount": req.amount,
+            "quote_asset": "INR",
+        }, k, s)
+        balance = _fetch_wallet(k, s)
+        return {"ok": True, "transfer_result": result, "trading_balance": balance}
+    except Exception as e:
+        raise HTTPException(502, f"Transfer failed: {e}")
 
 
 @app.get("/api/portfolio/positions")
@@ -523,9 +824,11 @@ async def account_balance(idx: int, _=Depends(auth)):
     if not (0 <= idx < len(accs)):
         raise HTTPException(404, "Account not found")
     try:
+        acc_name = accs[idx]["name"]
         k, s = _keys_for(accs[idx])
         wallet = _fetch_wallet(k, s)
-        positions = _fetch_positions(k, s, accs[idx]["name"])
+        positions = _fetch_positions(k, s, acc_name)
+
         return {"wallet": wallet, "positions": positions}
     except Exception as e:
         raise HTTPException(502, f"API error: {e}")
@@ -581,6 +884,52 @@ async def close_position(req: ClosePositionReq, _=Depends(auth)):
         raise HTTPException(502, str(e))
 
 
+
+class PlaceOrderReq2(BaseModel):
+    symbol:     str
+    side:       str        # "Buy" or "Sell"
+    qty:        str        # e.g. "0.01"
+    order_type: str = "Market"  # Market or Limit
+    price:      str = ""
+    account:    str = "master"
+
+
+@app.post("/api/portfolio/place-order")
+async def portfolio_place_order(req: PlaceOrderReq2, _=Depends(auth)):
+    if not _CS_OK:
+        raise HTTPException(503, "CoinSwitch module unavailable")
+    if not _live_allowed():
+        raise HTTPException(400, "DRY_RUN=true or before LIVE_FROM date")
+    if req.account == "master":
+        k, s = _env_get("COINSWITCH_API_KEY"), _env_get("COINSWITCH_API_SECRET")
+    else:
+        accs = _read_accs()
+        acct = next((a for a in accs if a["name"].lower() == req.account.lower()), None)
+        if not acct:
+            raise HTTPException(404, f"Account not found: {req.account}")
+        k, s = _keys_for(acct)
+    try:
+        body: dict = {
+            "category":    "option",
+            "symbol":      req.symbol,
+            "side":        req.side,
+            "orderType":   req.order_type,
+            "qty":         req.qty,
+            "timeInForce": "GTC" if req.order_type == "Limit" else "IOC",
+            "orderLinkId": str(uuid.uuid4()),
+            "reduceOnly":  False,
+        }
+        if req.order_type == "Limit" and req.price:
+            body["price"] = req.price
+        result = _cs_post("/v5/order/create", body, k, s)
+        if result.get("retCode") == 0:
+            return {"ok": True, "orderId": result["result"]["orderId"]}
+        raise HTTPException(400, result.get("retMsg", "Order failed"))
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(502, str(e))
+
 @app.get("/api/journal")
 async def get_journal(_=Depends(auth)):
     history_path = BOT_DIR / "logs" / "trade_history.json"
@@ -616,11 +965,347 @@ async def get_executions(_=Depends(auth)):
         k, s = _env_get("COINSWITCH_API_KEY"), _env_get("COINSWITCH_API_SECRET")
         r = _cs_get("/v5/execution/list", {"category": "option", "limit": "50"}, k, s)
         execs = r.get("result", {}).get("list", [])
-        # Compute realized PnL sum
-        total_pnl = sum(float(e.get("closedPnl", 0)) for e in execs)
+        total_pnl = sum(_sf(e.get("closedPnl", 0)) for e in execs)
         return {"executions": execs, "total_realised_pnl": total_pnl}
     except Exception as e:
         raise HTTPException(502, f"API error: {e}")
+
+
+# ── Per-account trading endpoints ─────────────────────────────────────────────
+
+@app.get("/api/accounts/{idx}/orders")
+async def account_orders(idx: int, _=Depends(auth)):
+    if not _CS_OK:
+        raise HTTPException(503, "CoinSwitch module unavailable")
+    accs = _read_accs()
+    if not (0 <= idx < len(accs)):
+        raise HTTPException(404, "Account not found")
+    k, s = _keys_for(accs[idx])
+    try:
+        return {"orders": _fetch_orders(k, s, accs[idx]["name"])}
+    except Exception as e:
+        raise HTTPException(502, str(e))
+
+
+@app.get("/api/accounts/{idx}/executions")
+async def account_executions(idx: int, limit: int = 30, _=Depends(auth)):
+    if not _CS_OK:
+        raise HTTPException(503, "CoinSwitch module unavailable")
+    accs = _read_accs()
+    if not (0 <= idx < len(accs)):
+        raise HTTPException(404, "Account not found")
+    k, s = _keys_for(accs[idx])
+    try:
+        r = _cs_get("/v5/execution/list", {"category": "option", "limit": str(limit)}, k, s)
+        execs = r.get("result", {}).get("list", [])
+        total_pnl = sum(_sf(e.get("closedPnl", 0)) for e in execs)
+        return {"executions": execs, "total_realised_pnl": total_pnl}
+    except Exception as e:
+        raise HTTPException(502, str(e))
+
+
+@app.get("/api/instruments")
+async def get_instruments(baseCoin: str = "BTC"):
+    """Fetch BTC option instruments via CoinSwitch (no user auth required)."""
+    import re as _re
+    if not _CS_OK:
+        raise HTTPException(503, "CoinSwitch module unavailable")
+    k, s = _env_get("COINSWITCH_API_KEY"), _env_get("COINSWITCH_API_SECRET")
+    try:
+        r = _cs_get("/v5/market/instruments-info",
+                    {"category": "option", "baseCoin": baseCoin, "status": "Trading", "limit": 1000},
+                    k, s)
+        instruments = r.get("result", {}).get("list", [])
+        def _parse_strike(sym: str) -> str:
+            m = _re.search(r'-(\d+)-[CP]-USDT$', sym)
+            return m.group(1) if m else ""
+        return [
+            {
+                "symbol": i["symbol"],
+                "strike": _parse_strike(i["symbol"]),
+                "type":   i.get("optionsType", ""),
+                "expiry": i.get("deliveryTime", ""),
+            }
+            for i in instruments
+        ]
+    except Exception as e:
+        raise HTTPException(502, str(e))
+
+
+@app.get("/api/market/symbols")
+async def search_symbols(strike: int, option_type: str, _=Depends(auth)):
+    """Search BTC option symbols by strike and type (C or P)."""
+    if not _CS_OK:
+        raise HTTPException(503, "CoinSwitch module unavailable")
+    k, s = _env_get("COINSWITCH_API_KEY"), _env_get("COINSWITCH_API_SECRET")
+    try:
+        r = _cs_get("/v5/market/tickers", {"category": "option", "baseCoin": "BTC"}, k, s)
+        tickers = r.get("result", {}).get("list", [])
+        suffix = f"-{strike}-{option_type.upper()}-USDT"
+        matches = [
+            {
+                "symbol":   t["symbol"],
+                "ask":      t.get("ask1Price", "0"),
+                "bid":      t.get("bid1Price", "0"),
+                "mark":     t.get("markPrice", "0"),
+                "iv":       t.get("markIv", ""),
+                "ask_size": t.get("ask1Size", "0"),
+            }
+            for t in tickers if t["symbol"].endswith(suffix)
+        ]
+        matches.sort(key=lambda x: x["symbol"])
+        return {"symbols": matches}
+    except Exception as e:
+        raise HTTPException(502, str(e))
+
+
+class PlaceOrderReq(BaseModel):
+    symbol:      str
+    side:        str        # Buy or Sell
+    qty:         str        # e.g. "0.01"
+    order_type:  str        # Market or Limit
+    price:       str = ""
+    reduce_only: bool = False
+
+
+@app.post("/api/accounts/{idx}/place-order")
+async def account_place_order(idx: int, req: PlaceOrderReq, _=Depends(auth)):
+    if not _CS_OK:
+        raise HTTPException(503, "CoinSwitch module unavailable")
+    accs = _read_accs()
+    if not (0 <= idx < len(accs)):
+        raise HTTPException(404, "Account not found")
+    k, s = _keys_for(accs[idx])
+    dry_run = _env_get("DRY_RUN").lower() == "true"
+    if dry_run:
+        return {"ok": True, "dry_run": True, "orderId": None, "note": "DRY RUN — no real order placed"}
+    try:
+        body: dict = {
+            "category":    "option",
+            "symbol":      req.symbol,
+            "side":        req.side,
+            "orderType":   req.order_type,
+            "qty":         req.qty,
+            "timeInForce": "GTC" if req.order_type == "Limit" else "IOC",
+            "orderLinkId": str(uuid.uuid4()),
+            "reduceOnly":  req.reduce_only,
+        }
+        if req.order_type == "Limit" and req.price:
+            body["price"] = req.price
+        result = _cs_post("/v5/order/create", body, k, s)
+        if result.get("retCode") == 0:
+            return {"ok": True, "dry_run": False, "orderId": result["result"]["orderId"]}
+        raise HTTPException(400, result.get("retMsg", "Order failed"))
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(502, str(e))
+
+
+# ── Open Orders ────────────────────────────────────────────────────────────────
+
+def _fetch_orders(api_key: str, api_secret: str, account_name: str) -> list:
+    r = _cs_get("/v5/order/realtime", {"category": "option", "limit": "50"}, api_key, api_secret)
+    out = []
+    for o in r.get("result", {}).get("list", []):
+        out.append({
+            "account":     account_name,
+            "orderId":     o["orderId"],
+            "orderLinkId": o.get("orderLinkId", ""),
+            "symbol":      o["symbol"],
+            "side":        o["side"],
+            "orderType":   o.get("orderType", ""),
+            "qty":         o.get("qty", ""),
+            "price":       o.get("price", ""),
+            "orderStatus": o.get("orderStatus", ""),
+            "createdTime": o.get("createdTime", ""),
+        })
+    return out
+
+
+@app.get("/api/portfolio/orders")
+async def portfolio_orders(_=Depends(auth)):
+    if not _CS_OK:
+        raise HTTPException(503, "CoinSwitch module unavailable")
+    orders: list = []
+    errors: list = []
+    try:
+        k, s = _env_get("COINSWITCH_API_KEY"), _env_get("COINSWITCH_API_SECRET")
+        orders += _fetch_orders(k, s, "master")
+    except Exception as e:
+        errors.append(f"master: {e}")
+    for acct in _read_accs():
+        if acct.get("api_key") and acct.get("api_secret"):
+            try:
+                orders += _fetch_orders(acct["api_key"], acct["api_secret"], acct["name"])
+            except Exception as e:
+                errors.append(f"{acct['name']}: {e}")
+    return {"orders": orders, "errors": errors}
+
+
+class CancelOrderReq(BaseModel):
+    symbol:   str
+    order_id: str
+    account:  str  # "master" or account name
+
+
+@app.post("/api/portfolio/orders/cancel")
+async def cancel_order(req: CancelOrderReq, _=Depends(auth)):
+    if not _CS_OK:
+        raise HTTPException(503, "CoinSwitch module unavailable")
+    if req.account == "master":
+        k, s = _env_get("COINSWITCH_API_KEY"), _env_get("COINSWITCH_API_SECRET")
+    else:
+        accs = _read_accs()
+        acct = next((a for a in accs if a["name"] == req.account), None)
+        if not acct:
+            raise HTTPException(404, "Account not found")
+        k, s = _keys_for(acct)
+    try:
+        result = _cs_post("/v5/order/cancel", {
+            "category": "option",
+            "symbol":   req.symbol,
+            "orderId":  req.order_id,
+        }, k, s)
+        if result.get("retCode") == 0:
+            return {"ok": True, "orderId": result["result"]["orderId"]}
+        raise HTTPException(400, result.get("retMsg", "Cancel failed"))
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(502, str(e))
+
+
+# ── Manual positions ───────────────────────────────────────────────────────────
+
+MANUAL_POS = BOT_DIR / "manual_positions.json"
+
+
+def _read_manual_pos() -> list:
+    return json.loads(MANUAL_POS.read_text()) if MANUAL_POS.exists() else []
+
+
+class ManualPositionInput(BaseModel):
+    account:   str
+    symbol:    str
+    side:      str   # Buy or Sell
+    size:      str
+    avg_price: str
+
+
+@app.get("/api/portfolio/positions/manual")
+async def get_manual_positions(_=Depends(auth)):
+    return {"positions": _read_manual_pos()}
+
+
+@app.post("/api/portfolio/positions/manual")
+async def add_manual_position(pos: ManualPositionInput, _=Depends(auth)):
+    positions = _read_manual_pos()
+    entry = pos.model_dump()
+    entry["id"]        = str(uuid.uuid4())
+    entry["createdAt"] = datetime.now().isoformat()
+    entry["manual"]    = True
+    entry["markPrice"] = "0"
+    if _CS_OK:
+        try:
+            k, s = _env_get("COINSWITCH_API_KEY"), _env_get("COINSWITCH_API_SECRET")
+            ticker_r = _cs_get("/v5/market/tickers", {"category": "option", "symbol": pos.symbol}, k, s)
+            tickers = ticker_r.get("result", {}).get("list", [])
+            if tickers:
+                entry["markPrice"] = tickers[0].get("markPrice", "0")
+        except Exception:
+            pass
+    positions.append(entry)
+    MANUAL_POS.write_text(json.dumps(positions, indent=2))
+    return {"ok": True, "id": entry["id"]}
+
+
+@app.delete("/api/portfolio/positions/manual/{pos_id}")
+async def delete_manual_position(pos_id: str, _=Depends(auth)):
+    positions = [p for p in _read_manual_pos() if p.get("id") != pos_id]
+    MANUAL_POS.write_text(json.dumps(positions, indent=2))
+    return {"ok": True}
+
+
+# ── Position mismatch detection ───────────────────────────────────────────────
+
+@app.get("/api/portfolio/mismatch")
+async def portfolio_mismatch(_=Depends(auth)):
+    """
+    Compare master account open positions against each child account.
+    Returns a list of child accounts with any positions the master has that they are missing.
+    """
+    if not _CS_OK:
+        raise HTTPException(503, "CoinSwitch module unavailable")
+    try:
+        mk, ms = _env_get("COINSWITCH_API_KEY"), _env_get("COINSWITCH_API_SECRET")
+        master_positions = _fetch_positions(mk, ms, "master")
+    except Exception as e:
+        raise HTTPException(502, f"Failed to fetch master positions: {e}")
+
+    result = []
+    for i, acc in enumerate(_read_accs()):
+        if acc.get("is_master"):
+            continue
+        if not acc.get("api_key") or not acc.get("api_secret"):
+            continue
+        try:
+            child_pos = _fetch_positions(acc["api_key"], acc["api_secret"], acc["name"])
+            child_syms = {p["symbol"] for p in child_pos}
+            missing = [p for p in master_positions if p["symbol"] not in child_syms]
+            result.append({
+                "account_idx": i,
+                "account":     acc["name"],
+                "missing":     missing,
+                "error":       None,
+            })
+        except Exception as e:
+            result.append({
+                "account_idx": i,
+                "account":     acc["name"],
+                "missing":     [],
+                "error":       str(e),
+            })
+
+    return {"mismatches": result}
+
+
+class SyncPositionInput(BaseModel):
+    account_idx: int
+    symbol:      str
+    side:        str   # "Sell" (short the same way master did)
+    size:        str   # qty in BTC
+
+
+@app.post("/api/portfolio/sync-position")
+async def sync_position(req: SyncPositionInput, _=Depends(auth)):
+    """Place a market order on a child account to replicate a master position."""
+    if not _CS_OK:
+        raise HTTPException(503, "CoinSwitch module unavailable")
+    if not _live_allowed():
+        raise HTTPException(400, "Cannot sync: DRY_RUN=true or before LIVE_FROM date")
+    accs = _read_accs()
+    if req.account_idx < 0 or req.account_idx >= len(accs):
+        raise HTTPException(404, "Account not found")
+    acc = accs[req.account_idx]
+    k, s = _keys_for(acc)
+    body = {
+        "category":    "option",
+        "symbol":      req.symbol,
+        "side":        req.side,
+        "orderType":   "Market",
+        "qty":         req.size,
+        "timeInForce": "IOC",
+        "orderLinkId": str(uuid.uuid4()),
+    }
+    try:
+        result = _cs_post("/v5/order/create", body, k, s)
+        if result.get("retCode") == 0:
+            log(f"Sync order placed for {acc['name']}: {req.symbol} {req.side} {req.size}")
+            return {"ok": True, "orderId": result["result"]["orderId"]}
+        return {"ok": False, "error": result.get("retMsg", "Unknown error")}
+    except Exception as e:
+        raise HTTPException(502, str(e))
 
 
 # ── Serve React build ─────────────────────────────────────────────────────────

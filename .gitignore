@@ -22,3 +22,12 @@ ui/.vite/
 # OS
 .DS_Store
 *.swp
+
+# Runtime / generated
+config.yaml
+web_ui.log
+.bot.lock
+manual_positions.json
+assets/
+index.html
+test_flow.py

@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react'
+import { useEffect, useState, useRef } from 'react'
 import { useOutletContext, Link } from 'react-router-dom'
 import { api, BotStatus, Position, WalletBalance } from '../api'
 
@@ -28,6 +28,116 @@ function fmt(n: number, decimals = 2) {
 
 function closeSide(side: string) { return side === 'Sell' ? 'Buy' : 'Sell' }
 
+interface PlaceOrderForm {
+  symbol: string; side: 'Buy' | 'Sell'; qty: string
+  order_type: 'Market' | 'Limit'; price: string
+}
+
+function PlaceOrderModal({ onClose, onPlaced }: { onClose: () => void; onPlaced: () => void }) {
+  const [form, setForm] = useState<PlaceOrderForm>({ symbol: '', side: 'Sell', qty: '0.01', order_type: 'Market', price: '' })
+  const [loading, setLoading] = useState(false)
+  const [err, setErr] = useState('')
+  const ref = useRef<HTMLDivElement>(null)
+
+  useEffect(() => {
+    const handler = (e: MouseEvent) => { if (ref.current && !ref.current.contains(e.target as Node)) onClose() }
+    document.addEventListener('mousedown', handler)
+    return () => document.removeEventListener('mousedown', handler)
+  }, [onClose])
+
+  async function submit() {
+    if (!form.symbol.trim()) { setErr('Symbol required'); return }
+    if (!form.qty.trim()) { setErr('Qty required'); return }
+    if (form.order_type === 'Limit' && !form.price.trim()) { setErr('Price required for Limit order'); return }
+    setLoading(true); setErr('')
+    try {
+      await api.portfolio.placeOrder({
+        symbol: form.symbol.trim().toUpperCase(),
+        side: form.side,
+        qty: form.qty.trim(),
+        order_type: form.order_type,
+        price: form.order_type === 'Limit' ? form.price.trim() : undefined,
+        account: 'master',
+      })
+      onPlaced()
+      onClose()
+    } catch (e: any) {
+      setErr(e.message ?? 'Order failed')
+    } finally {
+      setLoading(false)
+    }
+  }
+
+  return (
+    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 backdrop-blur-sm">
+      <div ref={ref} className="bg-s1 border border-border rounded-xl p-6 w-full max-w-md shadow-xl space-y-4">
+        <div className="flex items-center justify-between">
+          <h3 className="font-bold text-lg">Place Order</h3>
+          <button onClick={onClose} className="text-muted hover:text-tx text-xl leading-none">&times;</button>
+        </div>
+
+        <div className="space-y-3">
+          <div>
+            <label className="text-[11px] text-muted uppercase tracking-wider block mb-1">Symbol</label>
+            <input className="input font-mono text-xs w-full" placeholder="BTC-28AUG26-64000-P-USDT"
+              value={form.symbol} onChange={e => setForm(f => ({ ...f, symbol: e.target.value }))} />
+          </div>
+
+          <div className="grid grid-cols-2 gap-3">
+            <div>
+              <label className="text-[11px] text-muted uppercase tracking-wider block mb-1">Side</label>
+              <div className="flex rounded-lg overflow-hidden border border-border">
+                {(['Sell', 'Buy'] as const).map(s => (
+                  <button key={s} onClick={() => setForm(f => ({ ...f, side: s }))}
+                    className={`flex-1 py-1.5 text-sm font-semibold transition-colors ${form.side === s ? (s === 'Sell' ? 'bg-red text-white' : 'bg-green text-bg') : 'bg-s2 text-muted hover:text-tx'}`}>
+                    {s}
+                  </button>
+                ))}
+              </div>
+            </div>
+            <div>
+              <label className="text-[11px] text-muted uppercase tracking-wider block mb-1">Qty (lots)</label>
+              <input className="input font-mono text-xs w-full" placeholder="0.01"
+                value={form.qty} onChange={e => setForm(f => ({ ...f, qty: e.target.value }))} />
+            </div>
+          </div>
+
+          <div className="grid grid-cols-2 gap-3">
+            <div>
+              <label className="text-[11px] text-muted uppercase tracking-wider block mb-1">Order Type</label>
+              <div className="flex rounded-lg overflow-hidden border border-border">
+                {(['Market', 'Limit'] as const).map(t => (
+                  <button key={t} onClick={() => setForm(f => ({ ...f, order_type: t }))}
+                    className={`flex-1 py-1.5 text-sm font-semibold transition-colors ${form.order_type === t ? 'bg-accent text-bg' : 'bg-s2 text-muted hover:text-tx'}`}>
+                    {t}
+                  </button>
+                ))}
+              </div>
+            </div>
+            {form.order_type === 'Limit' && (
+              <div>
+                <label className="text-[11px] text-muted uppercase tracking-wider block mb-1">Price</label>
+                <input className="input font-mono text-xs w-full" placeholder="25.00"
+                  value={form.price} onChange={e => setForm(f => ({ ...f, price: e.target.value }))} />
+              </div>
+            )}
+          </div>
+        </div>
+
+        {err && <p className="text-red text-[12px]">{err}</p>}
+
+        <div className="flex gap-2 justify-end">
+          <button onClick={onClose} className="btn-ghost">Cancel</button>
+          <button onClick={submit} disabled={loading}
+            className={`px-4 py-1.5 rounded-lg text-sm font-semibold transition-colors disabled:opacity-40 ${form.side === 'Sell' ? 'bg-red text-white hover:bg-red/80' : 'bg-green text-bg hover:bg-green/80'}`}>
+            {loading ? 'Placing…' : `${form.side} ${form.qty || '?'} lots`}
+          </button>
+        </div>
+      </div>
+    </div>
+  )
+}
+
 export default function Dashboard() {
   const { status } = useOutletContext<Ctx>()
   const [logs, setLogs] = useState<string[]>([])
@@ -35,6 +145,7 @@ export default function Dashboard() {
   const [wallet, setWallet] = useState<WalletBalance | null>(null)
   const [positions, setPositions] = useState<Position[]>([])
   const [closing, setClosing] = useState<string | null>(null)
+  const [showPlaceOrder, setShowPlaceOrder] = useState(false)
 
   useEffect(() => {
     if (status?.uptime_seconds != null) setUptime(status.uptime_seconds)
@@ -66,10 +177,15 @@ export default function Dashboard() {
     return () => clearInterval(id)
   }, [])
 
+  async function refreshPositions() {
+    try { const r = await api.portfolio.positions(); setPositions(r.positions) } catch { /**/ }
+  }
+
   async function closePosition(pos: Position) {
     setClosing(pos.symbol + pos.account)
     try {
       await api.portfolio.close({ symbol: pos.symbol, side: pos.side, size: pos.size, account: pos.account })
+      await refreshPositions()
     } catch (e: any) {
       alert(e.message ?? 'Close failed')
     } finally {
@@ -81,6 +197,7 @@ export default function Dashboard() {
 
   return (
     <div className="p-4 sm:p-6 space-y-4">
+      {showPlaceOrder && <PlaceOrderModal onClose={() => setShowPlaceOrder(false)} onPlaced={refreshPositions} />}
 
       {/* Hero status */}
       <div className={[
@@ -89,7 +206,6 @@ export default function Dashboard() {
           ? 'bg-gradient-to-br from-s1 to-s2 border-border'
           : 'bg-gradient-to-br from-s1 to-[#200C06] border-red/25',
       ].join(' ')}>
-        {/* Orb — no pulse when running normally; pulse only on stopped to draw attention */}
         <div className={[
           'w-14 h-14 rounded-full flex items-center justify-center flex-shrink-0 transition-all duration-500',
           running
@@ -171,10 +287,22 @@ export default function Dashboard() {
         </div>
       </div>
 
-      {/* Open positions table */}
-      {positions.length > 0 && (
-        <div className="bg-s1 border border-border rounded-card p-4">
-          <div className="text-[10px] font-semibold text-muted uppercase tracking-widest mb-3">Open Positions</div>
+      {/* Open positions table — always show, even if empty */}
+      <div className="bg-s1 border border-border rounded-card p-4">
+        <div className="flex items-center justify-between mb-3">
+          <div className="text-[10px] font-semibold text-muted uppercase tracking-widest">
+            Open Positions ({positions.length})
+          </div>
+          <button
+            onClick={() => setShowPlaceOrder(true)}
+            className="text-[11px] px-3 py-1 rounded-lg border border-accent/40 text-accent hover:bg-accent/10 transition-colors font-semibold"
+          >
+            + Place Order
+          </button>
+        </div>
+        {positions.length === 0 ? (
+          <p className="text-muted text-[12px]">No open positions</p>
+        ) : (
           <div className="overflow-x-auto">
             <table className="w-full text-[12px]">
               <thead>
@@ -219,8 +347,8 @@ export default function Dashboard() {
               </tbody>
             </table>
           </div>
-        </div>
-      )}
+        )}
+      </div>
 
       {/* Live log */}
       <div className="bg-s1 border border-border rounded-card p-4">
