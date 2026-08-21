@@ -251,8 +251,9 @@ export default function Trading() {
   const [orders,     setOrders]     = useState<OpenOrder[]>([])
   const [execs,      setExecs]      = useState<Execution[]>([])
   const [totalPnl,   setTotalPnl]   = useState(0)
-  const [loading,    setLoading]    = useState(false)
-  const [closing,    setClosing]    = useState<string | null>(null)
+  const [loading,      setLoading]      = useState(false)
+  const [initialLoad,  setInitialLoad]  = useState(true)
+  const [closing,      setClosing]      = useState<string | null>(null)
   const [cancelling, setCancelling] = useState<string | null>(null)
   const [showOrder,  setShowOrder]  = useState(false)
 
@@ -304,6 +305,7 @@ export default function Trading() {
       setTotalPnl(ex.total_realised_pnl)
     } catch { /**/ } finally {
       setLoading(false)
+      setInitialLoad(false)
     }
   }
 
@@ -356,6 +358,63 @@ export default function Trading() {
       setCancelling(null)
     }
   }
+
+  // Skeleton while waiting for first data fetch
+  if (initialLoad) return (
+    <div className="p-4 sm:p-6 space-y-4 animate-pulse">
+      {/* Account bar */}
+      <div className="flex items-center gap-3">
+        <div className="h-8 w-44 bg-s3 rounded-lg" />
+        <div className="h-8 w-28 bg-s3 rounded-lg ml-auto" />
+      </div>
+      {/* KPI tiles */}
+      <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
+        {[1,2,3,4].map(i => (
+          <div key={i} className="card p-4 space-y-3">
+            <div className="h-2.5 w-20 bg-s3 rounded" />
+            <div className="h-6 w-28 bg-s3 rounded" />
+            <div className="h-2 w-16 bg-s3 rounded" />
+          </div>
+        ))}
+      </div>
+      {/* Margin bar */}
+      <div className="card p-4 space-y-2">
+        <div className="flex justify-between">
+          <div className="h-2.5 w-32 bg-s3 rounded" />
+          <div className="h-2.5 w-10 bg-s3 rounded" />
+        </div>
+        <div className="h-1.5 w-full bg-s3 rounded-full" />
+        <div className="flex justify-between">
+          <div className="h-2 w-24 bg-s3 rounded" />
+          <div className="h-2 w-24 bg-s3 rounded" />
+        </div>
+      </div>
+      {/* Positions table */}
+      <div className="card overflow-hidden">
+        <div className="px-4 py-3 border-b border-border"><div className="h-3 w-32 bg-s3 rounded" /></div>
+        {[1,2].map(r => (
+          <div key={r} className="flex gap-6 px-4 py-3.5 border-b border-border last:border-0">
+            <div className="h-3 w-40 bg-s3 rounded flex-1" />
+            <div className="h-3 w-10 bg-s3 rounded" />
+            <div className="h-3 w-16 bg-s3 rounded" />
+            <div className="h-3 w-20 bg-s3 rounded" />
+            <div className="h-6 w-16 bg-s3 rounded ml-auto" />
+          </div>
+        ))}
+      </div>
+      {/* Orders + Executions */}
+      {[1,2].map(i => (
+        <div key={i} className="card overflow-hidden">
+          <div className="px-4 py-3 border-b border-border"><div className="h-3 w-28 bg-s3 rounded" /></div>
+          <div className="flex gap-6 px-4 py-3.5">
+            <div className="h-3 w-36 bg-s3 rounded flex-1" />
+            <div className="h-3 w-16 bg-s3 rounded" />
+            <div className="h-3 w-20 bg-s3 rounded" />
+          </div>
+        </div>
+      ))}
+    </div>
+  )
 
   const acct = accounts[selIdx]
   const curMismatch = mismatches.find(m => m.account_idx === selIdx)
