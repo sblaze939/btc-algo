@@ -2,7 +2,7 @@ import asyncio
 import json
 import os
 import re
-from datetime import datetime
+from datetime import datetime, date as _date
 from pathlib import Path
 
 from telethon import TelegramClient, events
@@ -84,11 +84,41 @@ ACCOUNTS = load_accounts()
 
 # ── Signal handlers ───────────────────────────────────────────────────────────
 
+def _bybit_expiry_to_date(s: str):
+    """Convert Bybit expiry string '28AUG26' → date(2026,8,28), or None."""
+    MONTHS = {'JAN':1,'FEB':2,'MAR':3,'APR':4,'MAY':5,'JUN':6,
+              'JUL':7,'AUG':8,'SEP':9,'OCT':10,'NOV':11,'DEC':12}
+    m = re.fullmatch(r'(\d{1,2})([A-Z]{3})(\d{2})', (s or "").strip())
+    if not m:
+        return None
+    d, mon, y = m.groups()
+    mn = MONTHS.get(mon)
+    if not mn:
+        return None
+    try:
+        return _date(2000 + int(y), mn, int(d))
+    except ValueError:
+        return None
+
+
 async def execute_signal_for_all_accounts(signal: dict):
     """Dispatch signal to all accounts — handles normal, full_exit, and close_all."""
     # Reload accounts fresh so runtime changes (skip_expiry, active toggle) apply immediately
     accounts = load_accounts()
     sig_expiry_parsed = _parse_expiry(signal.get("expiry_date", "") or "")
+
+    # Global TRADE_FROM_EXPIRY gate — skip entire signal if its expiry is before configured date
+    trade_from_env = os.getenv("TRADE_FROM_EXPIRY", "").strip()
+    if trade_from_env and sig_expiry_parsed:
+        sig_date = _bybit_expiry_to_date(sig_expiry_parsed)
+        try:
+            tfe_date = _date.fromisoformat(trade_from_env)
+        except ValueError:
+            tfe_date = None
+        if sig_date and tfe_date and sig_date < tfe_date:
+            log(f"SKIP GLOBAL: signal expiry {sig_expiry_parsed} < TRADE_FROM_EXPIRY {trade_from_env} — signal ignored")
+            return
+
     for acc in accounts:
         # Skip if account is set to skip this expiry (late-joiner protection)
         skip_expiry = acc.get("skip_expiry")
@@ -130,6 +160,14 @@ async def execute_signal_for_all_accounts(signal: dict):
 
 async def handle_new_message(event):
     msg = event.message
+
+    # Skip messages older than 3 minutes — prevents re-processing stale messages on reconnect
+    from datetime import timezone as _tz
+    msg_age = (datetime.now(_tz.utc) - msg.date.replace(tzinfo=_tz.utc)).total_seconds()
+    if msg_age > 180:
+        log(f"SKIPPED: Message is {int(msg_age)}s old (stale) — ignoring")
+        return
+
     log(f"New message in channel. Has media: {bool(msg.media)}")
 
     has_image = msg.media and isinstance(msg.media, (MessageMediaPhoto, MessageMediaDocument))
@@ -312,15 +350,10 @@ def _validate_friday_expiry(expiry_str: str) -> str | None:
             f"{corrected.strftime('%d %b %y')} (same date is a Friday in adjacent month)")
         return corrected.strftime("%-d %b %y")
 
-    # ── Fallback: nearest Friday to stated date ────────────────────────────────
-    days_since = (d.weekday() - 4) % 7
-    days_until = (4 - d.weekday()) % 7
-    preceding  = d - _td(days=days_since)
-    following  = d + _td(days=days_until)
-    today      = _date.today()
-    nearest    = preceding if preceding >= today else following
-    log(f"INFO: '{expiry_str}' is a {d.strftime('%A')} — snapping to nearest Friday {nearest.strftime('%d %b %y')}")
-    return nearest.strftime("%-d %b %y")
+    # ── Fallback: no adjacent Friday found — defer to current expiry ──────────
+    # Return None so the signal is treated as no-date → find_option_symbol uses CURRENT_EXPIRY
+    log(f"INFO: '{expiry_str}' is a {d.strftime('%A')} and no adjacent Friday found — deferring to current expiry")
+    return None
 
 
 def is_valid_text_signal(signal: dict) -> bool:
@@ -353,10 +386,19 @@ def parse_text_signal(text: str, inherit: dict = None) -> dict | None:
     if not t:
         return None
 
+    # Info-only messages — skip silently, no WARNING
+    _INFO_HINTS = [r"\bincoming\b", r"\bexpected\b", r"\bfyi\b",
+                   r"\breminder\b", r"\bheads?\s*up\b", r"\bwatch\s*out\b",
+                   r"\btoday is expiry\b", r"\bexpiry day\b", r"\bjust info\b"]
+    if any(re.search(p, t) for p in _INFO_HINTS):
+        log(f"INFO: skipping informational message: '{text[:60]}'")
+        return None
+
     # Action: sell | buy | exit | close (close → exit)
-    action_match = re.search(r"\b(sell|buy|exit|close)\b", t)
+    action_match = re.search(r"\b(sell|buy|exit|close|add|book)\b", t)
     action_raw   = action_match.group(1) if action_match else None
-    action       = "exit" if action_raw == "close" else (action_raw or (inherit or {}).get("action"))
+    _ACTION_MAP  = {"close": "exit", "book": "exit", "add": "sell"}
+    action       = _ACTION_MAP.get(action_raw, action_raw) or (inherit or {}).get("action")
     if not action:
         return None
 
@@ -364,7 +406,11 @@ def parse_text_signal(text: str, inherit: dict = None) -> dict | None:
     is_full = bool(re.search(r"\b(full|fully|all|complete|completely)\b", t))
 
     # Lots (explicit number only)
-    lots_match = re.search(r"(\d+)\s*lots?\b", t)
+    lots_match = (
+        re.search(r"(\d+)\s*(?:more\s+|additional\s+|extra\s+|of\s+)?lots?\b", t) or
+        re.search(r"\b(?:sell|buy|add|exit|close|book)\s+(\d{1,2})\b", t) or
+        re.search(r"[-–—]\s*(\d{1,2})\s*(?:lots?\s*)?(?:sell|buy|add|exit|close|book)", t)
+    )
     lots       = int(lots_match.group(1)) if lots_match else None
     if lots is None and not is_full:
         lots = (inherit or {}).get("lots")
@@ -417,17 +463,14 @@ def parse_text_signal(text: str, inherit: dict = None) -> dict | None:
 # ── Main ──────────────────────────────────────────────────────────────────────
 
 async def heartbeat():
-    """Log every 10 min; send Telegram alert every 60 min (deletes previous)."""
+    """Log + send Telegram alert every 15 min (deletes previous)."""
     from coinswitch_trader import DRY_RUN
     mode    = "DRY RUN" if DRY_RUN else "LIVE TRADING"
-    tick    = 0
     prev_id = None
     while True:
-        await asyncio.sleep(600)
-        tick += 1
+        await asyncio.sleep(900)  # 15 min
         log(f"Heartbeat — bot alive | mode={mode} | accounts={[a['name'] for a in ACCOUNTS]}")
-        if tick % 6 == 0:  # every 60 min
-            prev_id = alert_heartbeat(mode, [a["name"] for a in ACCOUNTS], prev_msg_id=prev_id)
+        prev_id = alert_heartbeat(mode, [a["name"] for a in ACCOUNTS], prev_msg_id=prev_id)
 
 
 async def main():
