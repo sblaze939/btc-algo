@@ -30,7 +30,7 @@ export default function Login() {
           <div className="w-14 h-14 rounded-2xl bg-gradient-to-br from-accent to-[#A07820] flex items-center justify-center font-bold text-xl text-bg shadow-[0_8px_24px_rgba(212,168,67,0.3)] mb-4">
             KA
           </div>
-          <h1 className="text-xl font-bold tracking-tight">KiraFX Algos</h1>
+          <h1 className="text-xl font-bold tracking-tight">Kirasha <span className="text-accent">BTC Algo</span></h1>
           <p className="text-muted text-sm mt-1">BTC Options Management</p>
         </div>
 
@@ -58,7 +58,7 @@ export default function Login() {
         </form>
 
         <p className="text-center text-muted2 text-xs mt-4">
-          Oracle Cloud · trading-bots · 129.225.65.244
+          kirasha.in · BTC Options Strategy
         </p>
       </div>
     </div>
