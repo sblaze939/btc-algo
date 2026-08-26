@@ -192,6 +192,58 @@ export interface ExecutionsData {
   total_realised_pnl: number
 }
 
+export interface GainEntry {
+  expiry:           string   // ISO "2026-08-28"
+  gain_pct:         number
+  type:             'manual' | 'algo' | 'break'
+  source:           string
+  note?:            string
+  realized_usdt?:   number
+  starting_balance?: number
+}
+
+export interface GainStats {
+  all_time_gain_pct:   number
+  launch_gain_pct:     number
+  win_rate:            number
+  wins:                number
+  losses:              number
+  total_weeks:         number
+  streak:              number
+  best_week_pct:       number
+  worst_week_pct:      number
+  initial_balance:     number
+  launch_expiry:       string
+  current_balance_est: number
+}
+
+export interface CurrentExpiryGain {
+  expiry:             string   // Bybit format e.g. "28AUG26"
+  expiry_iso:         string   // "2026-08-28"
+  realized_pnl:       number
+  unrealized_pnl:     number
+  total_pnl:          number
+  starting_balance:   number
+  gain_pct:           number
+  is_live:            boolean  // true = open positions exist for this expiry
+  all_positions_flat: boolean
+  error?:             string
+}
+
+export interface GainsData {
+  entries:         GainEntry[]
+  stats:           GainStats
+  current_expiry:  CurrentExpiryGain | null
+}
+
+export interface GainEntryInput {
+  expiry:   string
+  gain_pct: number
+  type:     'manual' | 'algo' | 'break'
+  source?:  string
+  note?:    string
+}
+
 // ── API surface ───────────────────────────────────────────────────────────────
 
 export const api = {
@@ -265,5 +317,13 @@ export const api = {
       req<{ ok: boolean; transfer_result: unknown; trading_balance: WalletBalance }>(
         'POST', `/api/accounts/${idx}/transfer`, { direction, amount }
       ),
+  },
+
+  gains: {
+    get:           ()                      => req<GainsData>('GET',  '/api/gains'),
+    current:       ()                      => req<CurrentExpiryGain>('GET', '/api/gains/current'),
+    add:           (g: GainEntryInput)     => req<{ ok: boolean }>('POST', '/api/gains', g),
+    remove:        (expiry: string)        => req<{ ok: boolean }>('DELETE', `/api/gains/${expiry}`),
+    setInitialBal: (balance: number)       => req<{ ok: boolean; initial_balance: number }>('POST', '/api/gains/initial-balance', { balance }),
   },
 }

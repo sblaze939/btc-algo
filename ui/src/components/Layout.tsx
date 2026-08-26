@@ -12,15 +12,17 @@ const IcoPlay    = () => <svg className="w-3 h-3" fill="none" viewBox="0 0 24 24
 const IcoStop    = () => <svg className="w-3 h-3" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2.5}><rect x="6" y="6" width="12" height="12" rx="1"/></svg>
 const IcoRestart = () => <svg className="w-3 h-3" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2.5}><polyline points="1 4 1 10 7 10"/><path d="M3.51 15a9 9 0 1 0 .49-3.86"/></svg>
 
-const IcoTrading = () => <svg className="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={1.75}><polyline points="22 7 13.5 15.5 8.5 10.5 2 17"/><polyline points="16 7 22 7 22 13"/></svg>
+const IcoTrading     = () => <svg className="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={1.75}><polyline points="22 7 13.5 15.5 8.5 10.5 2 17"/><polyline points="16 7 22 7 22 13"/></svg>
+const IcoPerformance = () => <svg className="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={1.75}><rect x="2" y="3" width="20" height="14" rx="2"/><line x1="8" y1="21" x2="16" y2="21"/><line x1="12" y1="17" x2="12" y2="21"/><polyline points="7 13 10 10 13 12 17 7"/></svg>
 
 const NAV = [
-  { to: '/dashboard', label: 'Dashboard', Icon: IcoDash },
-  { to: '/accounts',  label: 'Accounts',  Icon: IcoAccs },
-  { to: '/trading',   label: 'Trading',   Icon: IcoTrading },
-  { to: '/journal',   label: 'Journal',   Icon: IcoJournal },
-  { to: '/settings',  label: 'Settings',  Icon: IcoSettings },
-  { to: '/logs',      label: 'Logs',      Icon: IcoLogs },
+  { to: '/dashboard',   label: 'Dashboard',   Icon: IcoDash },
+  { to: '/accounts',    label: 'Accounts',    Icon: IcoAccs },
+  { to: '/trading',     label: 'Trading',     Icon: IcoTrading },
+  { to: '/performance', label: 'Performance', Icon: IcoPerformance },
+  { to: '/journal',     label: 'Journal',     Icon: IcoJournal },
+  { to: '/settings',    label: 'Settings',    Icon: IcoSettings },
+  { to: '/logs',        label: 'Logs',        Icon: IcoLogs },
 ]
 
 function navCls({ isActive }: { isActive: boolean }) {
@@ -108,7 +110,7 @@ export default function Layout() {
         {/* Topbar */}
         <header className="flex items-center gap-3 px-4 h-12 bg-s1 border-b border-border flex-shrink-0">
           <span className="font-bold text-[15px] tracking-tight hidden sm:block">
-            KiraFX <span className="text-accent">Algos</span>
+            Kirasha <span className="text-accent">BTC Algo</span>
           </span>
 
           {/* Status — single static indicator, no pulse */}

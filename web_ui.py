@@ -8,6 +8,7 @@ import json
 import os
 import sys
 import subprocess
+import time
 import uuid
 from datetime import datetime, date, timedelta
 from pathlib import Path
@@ -163,9 +164,11 @@ from contextlib import asynccontextmanager
 
 @asynccontextmanager
 async def _lifespan(app):
-    task = asyncio.create_task(_daily_sync())
+    t1 = asyncio.create_task(_daily_sync())
+    t2 = asyncio.create_task(_settlement_watcher())
     yield
-    task.cancel()
+    t1.cancel()
+    t2.cancel()
 
 app = FastAPI(title="KiraFX Algos UI", lifespan=_lifespan)
 BOT_DIR           = Path(__file__).parent
@@ -238,10 +241,18 @@ def _pid() -> Optional[int]:
 
 
 def _uptime() -> Optional[int]:
-    log = BOT_DIR / "logs" / "trades.log"
-    if not log.exists():
+    pid = _pid()
+    if pid is not None:
+        try:
+            # Use /proc/{pid} mtime as process creation time (Linux)
+            return int(time.time() - os.stat(f"/proc/{pid}").st_mtime)
+        except Exception:
+            pass
+    # Fallback: scan trades.log for startup message
+    log_file = BOT_DIR / "logs" / "trades.log"
+    if not log_file.exists():
         return None
-    for line in reversed(log.read_text().splitlines()):
+    for line in reversed(log_file.read_text().splitlines()):
         if "Starting BTC Options Bot" in line:
             try:
                 ts = datetime.strptime(line[1:20], "%Y-%m-%d %H:%M:%S")
@@ -603,11 +614,16 @@ async def save_settings(s: SettingsInput, _=Depends(auth)):
         _env_set("API_KEY_VALIDITY_DAYS", str(s.api_key_validity_days))
     if s.bot_token:
         _env_set("TELEGRAM_BOT_TOKEN", s.bot_token)
+    key_changed = False
     if s.cs_api_key:
+        if s.cs_api_key != (_env_get("COINSWITCH_API_KEY") or ""):
+            key_changed = True
         _env_set("COINSWITCH_API_KEY", s.cs_api_key)
     if s.cs_api_secret:
+        if s.cs_api_secret != (_env_get("COINSWITCH_API_SECRET") or ""):
+            key_changed = True
         _env_set("COINSWITCH_API_SECRET", s.cs_api_secret)
-    if s.cs_api_key or s.cs_api_secret:
+    if key_changed:
         _env_set("COINSWITCH_API_KEY_UPDATED_AT", date.today().isoformat())
         _recompute_master_expiry()
     elif s.api_key_validity_days and s.api_key_validity_days > 0:
@@ -1225,6 +1241,274 @@ async def sync_position(req: SyncPositionInput, _=Depends(auth)):
         return {"ok": False, "error": result.get("retMsg", "Unknown error")}
     except Exception as e:
         raise HTTPException(502, str(e))
+
+
+# ── Weekly Gains ──────────────────────────────────────────────────────────────
+
+GAINS_FILE   = BOT_DIR / "logs" / "weekly_gains.json"
+_LAUNCH_DATE = "2026-08-28"   # first algo expiry; counts toward "since launch" metric
+
+
+def _read_gains_file() -> dict:
+    if not GAINS_FILE.exists():
+        return {"initial_balance": 531.0, "launch_expiry": _LAUNCH_DATE, "entries": []}
+    return json.loads(GAINS_FILE.read_text())
+
+
+def _write_gains_file(data: dict):
+    GAINS_FILE.write_text(json.dumps(data, indent=2))
+
+
+def _compute_gains_stats(entries: list, initial_balance: float) -> dict:
+    tradeable = [e for e in entries if e.get("type") != "break"]
+    all_running = 1.0
+    launch_running = 1.0
+    wins = losses = 0
+    for e in entries:
+        if e.get("type") == "break":
+            continue
+        pct = e.get("gain_pct", 0)
+        all_running *= (1 + pct / 100)
+        if e["expiry"] >= _LAUNCH_DATE:
+            launch_running *= (1 + pct / 100)
+        if pct > 0:
+            wins += 1
+        elif pct < 0:
+            losses += 1
+
+    streak = 0
+    for e in reversed(tradeable):
+        if e.get("gain_pct", 0) > 0:
+            streak += 1
+        else:
+            break
+
+    total = len(tradeable)
+    all_pcts = [e["gain_pct"] for e in tradeable] if tradeable else [0]
+    return {
+        "all_time_gain_pct":  round((all_running    - 1) * 100, 2),
+        "launch_gain_pct":    round((launch_running - 1) * 100, 2),
+        "win_rate":           round(wins / total * 100, 1) if total else 0,
+        "wins":               wins,
+        "losses":             losses,
+        "total_weeks":        total,
+        "streak":             streak,
+        "best_week_pct":      max(all_pcts),
+        "worst_week_pct":     min(all_pcts),
+        "initial_balance":    initial_balance,
+        "launch_expiry":      _LAUNCH_DATE,
+        "current_balance_est": round(initial_balance * launch_running, 2),
+    }
+
+
+def _compute_current_expiry_live() -> Optional[dict]:
+    """Live P&L for the current expiry cycle, filtered by expiry tag in symbol."""
+    if not _CS_OK:
+        return None
+    k = _env_get("COINSWITCH_API_KEY")
+    s = _env_get("COINSWITCH_API_SECRET")
+    if not k or not s:
+        return None
+
+    current_expiry_iso = _env_get("CURRENT_EXPIRY") or _env_get("LIVE_FROM")
+    if not current_expiry_iso:
+        return None
+
+    try:
+        bybit_expiry = _cs_parse_expiry(current_expiry_iso)
+    except Exception:
+        return None
+    if not bybit_expiry:
+        return None
+
+    try:
+        # Realized PnL from executions for this expiry
+        exec_r = _cs_get("/v5/execution/list", {"category": "option", "limit": "200"}, k, s)
+        realized_pnl = sum(
+            _sf(e.get("closedPnl", 0))
+            for e in exec_r.get("result", {}).get("list", [])
+            if bybit_expiry in (e.get("symbol") or "")
+        )
+
+        # Unrealized PnL from open positions for this expiry
+        pos_r  = _cs_get("/v5/position/list", {"category": "option", "settleCoin": "USDT"}, k, s)
+        open_positions = [
+            p for p in pos_r.get("result", {}).get("list", [])
+            if bybit_expiry in (p.get("symbol") or "") and _sf(p.get("size", 0)) > 0
+        ]
+        unrealized_pnl = sum(_sf(p.get("unrealisedPnl", 0)) for p in open_positions)
+        total_pnl      = realized_pnl + unrealized_pnl
+
+        cycle_start_str = _env_get("CYCLE_START_BALANCE")
+        try:
+            starting_balance = float(cycle_start_str) if cycle_start_str else float(_env_get("INITIAL_BALANCE") or 531)
+        except ValueError:
+            starting_balance = 531.0
+
+        gain_pct = round(total_pnl / starting_balance * 100, 2) if starting_balance else 0
+
+        return {
+            "expiry":            bybit_expiry,
+            "expiry_iso":        current_expiry_iso,
+            "realized_pnl":      round(realized_pnl,   4),
+            "unrealized_pnl":    round(unrealized_pnl,  4),
+            "total_pnl":         round(total_pnl,       4),
+            "starting_balance":  starting_balance,
+            "gain_pct":          gain_pct,
+            "is_live":           len(open_positions) > 0,
+            "all_positions_flat": len(open_positions) == 0,
+        }
+    except Exception as e:
+        return {"error": str(e), "expiry": bybit_expiry, "expiry_iso": current_expiry_iso}
+
+
+def _advance_expiry_if_needed():
+    """Advance CURRENT_EXPIRY to the next Friday (7 days) if current has passed."""
+    from datetime import date as _date, timedelta as _td
+    current = _env_get("CURRENT_EXPIRY") or _env_get("LIVE_FROM")
+    if not current:
+        return
+    try:
+        exp = _date.fromisoformat(current)
+    except ValueError:
+        return
+    if _date.today() <= exp:
+        return
+    _env_set("CURRENT_EXPIRY", (exp + _td(days=7)).isoformat())
+
+
+async def _settlement_watcher():
+    """Every 5 min: if current expiry has passed and all positions are flat, auto-write gain entry."""
+    await asyncio.sleep(120)
+    while True:
+        await asyncio.sleep(300)
+        try:
+            await _auto_settle_check()
+        except Exception:
+            pass
+
+
+async def _auto_settle_check():
+    from datetime import date as _date
+    if not _CS_OK:
+        return
+
+    current_expiry_iso = _env_get("CURRENT_EXPIRY") or _env_get("LIVE_FROM")
+    if not current_expiry_iso:
+        return
+    try:
+        expiry_date = _date.fromisoformat(current_expiry_iso)
+    except ValueError:
+        return
+    if _date.today() < expiry_date:
+        return  # Not yet expired
+
+    data = _read_gains_file()
+    already_recorded = any(e["expiry"] == current_expiry_iso for e in data.get("entries", []))
+    if already_recorded:
+        _advance_expiry_if_needed()
+        return
+
+    # Wait until all current-expiry positions are flat
+    k = _env_get("COINSWITCH_API_KEY")
+    s = _env_get("COINSWITCH_API_SECRET")
+    if not k or not s:
+        return
+    bybit_expiry = _cs_parse_expiry(current_expiry_iso)
+    if not bybit_expiry:
+        return
+    try:
+        pos_r = _cs_get("/v5/position/list", {"category": "option", "settleCoin": "USDT"}, k, s)
+        open_now = [
+            p for p in pos_r.get("result", {}).get("list", [])
+            if bybit_expiry in (p.get("symbol") or "") and _sf(p.get("size", 0)) > 0
+        ]
+        if open_now:
+            return  # Still open — wait
+    except Exception:
+        return
+
+    live = _compute_current_expiry_live()
+    if not live or "error" in live:
+        return
+
+    entry = {
+        "expiry":           current_expiry_iso,
+        "gain_pct":         live["gain_pct"],
+        "type":             "algo",
+        "source":           "auto",
+        "realized_usdt":    live["realized_pnl"],
+        "starting_balance": live["starting_balance"],
+    }
+    data["entries"].append(entry)
+    data["entries"].sort(key=lambda e: e["expiry"])
+    _write_gains_file(data)
+
+    # Snapshot new cycle starting balance from live wallet
+    try:
+        wallet = _fetch_wallet(k, s)
+        _env_set("CYCLE_START_BALANCE", str(round(wallet["wallet_balance"], 4)))
+        _env_set("LAST_SETTLED_EXPIRY", current_expiry_iso)
+    except Exception:
+        pass
+
+    _advance_expiry_if_needed()
+
+
+@app.get("/api/gains")
+async def get_gains(_=Depends(auth)):
+    data    = _read_gains_file()
+    entries = data.get("entries", [])
+    initial = float(data.get("initial_balance", 531))
+    stats   = _compute_gains_stats(entries, initial)
+    current = _compute_current_expiry_live()
+    return {"entries": entries, "stats": stats, "current_expiry": current}
+
+
+@app.get("/api/gains/current")
+async def get_current_gain(_=Depends(auth)):
+    result = _compute_current_expiry_live()
+    if result is None:
+        raise HTTPException(503, "CoinSwitch unavailable or no CURRENT_EXPIRY set")
+    return result
+
+
+class GainEntry(BaseModel):
+    expiry:   str
+    gain_pct: float
+    type:     str = "manual"
+    source:   str = "manual"
+    note:     str = ""
+
+
+@app.post("/api/gains")
+async def add_gain(g: GainEntry, _=Depends(auth)):
+    data    = _read_gains_file()
+    entries = [e for e in data.get("entries", []) if e["expiry"] != g.expiry]
+    entries.append(g.model_dump())
+    entries.sort(key=lambda e: e["expiry"])
+    data["entries"] = entries
+    _write_gains_file(data)
+    return {"ok": True}
+
+
+@app.delete("/api/gains/{expiry_date}")
+async def delete_gain(expiry_date: str, _=Depends(auth)):
+    data = _read_gains_file()
+    data["entries"] = [e for e in data.get("entries", []) if e["expiry"] != expiry_date]
+    _write_gains_file(data)
+    return {"ok": True}
+
+
+@app.post("/api/gains/initial-balance")
+async def set_initial_balance(body: dict, _=Depends(auth)):
+    """Update the initial trading balance (531 USDT baseline)."""
+    bal = float(body.get("balance", 531))
+    data = _read_gains_file()
+    data["initial_balance"] = bal
+    _write_gains_file(data)
+    _env_set("INITIAL_BALANCE", str(bal))
+    return {"ok": True, "initial_balance": bal}
 
 
 # ── Serve React build ─────────────────────────────────────────────────────────
