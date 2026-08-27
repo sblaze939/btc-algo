@@ -257,6 +257,12 @@ export default function Trading() {
   const [cancelling, setCancelling] = useState<string | null>(null)
   const [showOrder,  setShowOrder]  = useState(false)
 
+  // Current expiry
+  const [currentExpiry,    setCurrentExpiry]    = useState<string>('')
+  const [editingExpiry,    setEditingExpiry]     = useState(false)
+  const [expiryDraft,      setExpiryDraft]       = useState('')
+  const [savingExpiry,     setSavingExpiry]      = useState(false)
+
   // Mismatch
   const [mismatches, setMismatches] = useState<MismatchAccount[]>([])
   const [syncing,    setSyncing]    = useState<string | null>(null)   // symbol being synced
@@ -269,9 +275,21 @@ export default function Trading() {
 
   useEffect(() => {
     api.accounts.list().then(setAccounts).catch(() => {})
-    // Mismatch check runs once on load (only meaningful when child accounts exist)
     api.mismatch.get().then(r => setMismatches(r.mismatches)).catch(() => {})
+    api.settings.get().then(s => setCurrentExpiry(s.current_expiry || '')).catch(() => {})
   }, [])
+
+  async function saveExpiry() {
+    if (!expiryDraft) return
+    setSavingExpiry(true)
+    try {
+      await api.settings.setExpiry(expiryDraft)
+      setCurrentExpiry(expiryDraft)
+      setEditingExpiry(false)
+    } catch { /**/ } finally {
+      setSavingExpiry(false)
+    }
+  }
 
   useEffect(() => {
     if (!accounts.length) return
@@ -504,6 +522,49 @@ export default function Trading() {
                   )
                 })}
               </div>
+            </div>
+          )}
+        </div>
+
+        {/* Current Expiry chip */}
+        <div className="flex items-center gap-1.5">
+          {!editingExpiry ? (
+            <button
+              onClick={() => { setExpiryDraft(currentExpiry); setEditingExpiry(true) }}
+              className="flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg border border-border bg-s1 hover:border-accent/60 transition-colors group"
+              title="Click to change current expiry"
+            >
+              <span className="text-[10px] font-semibold text-muted uppercase tracking-wider">Expiry</span>
+              <span className="text-[12px] font-mono font-bold text-accent">
+                {currentExpiry
+                  ? new Date(currentExpiry + 'T00:00:00').toLocaleDateString('en-IN', { day: '2-digit', month: 'short', year: '2-digit' })
+                  : '—'}
+              </span>
+              <span className="text-[10px] text-muted group-hover:text-accent transition-colors">✎</span>
+            </button>
+          ) : (
+            <div className="flex items-center gap-1.5">
+              <input
+                type="date"
+                autoFocus
+                value={expiryDraft}
+                onChange={e => setExpiryDraft(e.target.value)}
+                onKeyDown={e => { if (e.key === 'Enter') saveExpiry(); if (e.key === 'Escape') setEditingExpiry(false) }}
+                className="bg-bg border border-accent rounded px-2 py-1 text-[12px] font-mono text-tx focus:outline-none"
+              />
+              <button
+                onClick={saveExpiry}
+                disabled={savingExpiry || !expiryDraft}
+                className="px-2.5 py-1 rounded bg-accent text-bg text-[11px] font-bold hover:opacity-85 disabled:opacity-40 transition-opacity"
+              >
+                {savingExpiry ? '…' : 'Set'}
+              </button>
+              <button
+                onClick={() => setEditingExpiry(false)}
+                className="px-2 py-1 rounded border border-border text-muted text-[11px] hover:text-tx transition-colors"
+              >
+                ✕
+              </button>
             </div>
           )}
         </div>

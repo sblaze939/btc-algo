@@ -281,8 +281,9 @@ export const api = {
   },
 
   settings: {
-    get:  ()                 => req<Settings>('GET',  '/api/settings'),
-    save: (s: SettingsInput) => req<{ ok: boolean; note: string }>('POST', '/api/settings', s),
+    get:        ()                 => req<Settings>('GET',  '/api/settings'),
+    save:       (s: SettingsInput) => req<{ ok: boolean; note: string }>('POST', '/api/settings', s),
+    setExpiry:  (e: string)        => req<{ ok: boolean; current_expiry: string }>('POST', '/api/settings/current-expiry', { current_expiry: e }),
   },
 
   portfolio: {
