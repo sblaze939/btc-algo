@@ -139,12 +139,21 @@ def _parse_expiry(expiry_hint: str) -> str | None:
     months = {"jan":"JAN","feb":"FEB","mar":"MAR","apr":"APR","may":"MAY","jun":"JUN",
                "jul":"JUL","aug":"AUG","sep":"SEP","oct":"OCT","nov":"NOV","dec":"DEC"}
     import re
+    from datetime import date as _date
     s = expiry_hint.strip()
     # Already in Bybit format (with or without leading zero)
     if re.match(r"^\d{1,2}[A-Z]{3}\d{2}$", s):
         # Normalise: strip leading zero on day
         m = re.match(r"^0(\d[A-Z]{3}\d{2})$", s)
         return m.group(1) if m else s
+    # ISO format YYYY-MM-DD (e.g. '2026-09-04' → '4SEP26')
+    m = re.match(r"^(\d{4})-(\d{2})-(\d{2})$", s)
+    if m:
+        try:
+            d = _date(int(m.group(1)), int(m.group(2)), int(m.group(3)))
+            return f"{d.day}{d.strftime('%b').upper()}{str(d.year)[-2:]}"
+        except ValueError:
+            pass
     # Try to extract day, month, year
     parts = re.findall(r"[A-Za-z]+|\d+", s)
     day = month_str = year_str = None

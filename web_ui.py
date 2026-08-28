@@ -1333,15 +1333,16 @@ def _compute_current_expiry_live(expiry_iso: Optional[str] = None) -> Optional[d
         return None
 
     try:
-        # Realized PnL from executions for this expiry
-        exec_r = _cs_get("/v5/execution/list", {"category": "option", "limit": "200"}, k, s)
+        # Bybit options: closedPnl in execution/list is always 0.
+        # Use position/closed-pnl for accurate realized P&L on manually closed positions.
+        closed_r = _cs_get("/v5/position/closed-pnl", {"category": "option", "limit": "200"}, k, s)
         realized_pnl = sum(
             _sf(e.get("closedPnl", 0))
-            for e in exec_r.get("result", {}).get("list", [])
+            for e in closed_r.get("result", {}).get("list", [])
             if bybit_expiry in (e.get("symbol") or "")
         )
 
-        # Unrealized PnL from open positions for this expiry
+        # Unrealized PnL from any still-open positions for this expiry
         pos_r  = _cs_get("/v5/position/list", {"category": "option", "settleCoin": "USDT"}, k, s)
         open_positions = [
             p for p in pos_r.get("result", {}).get("list", [])
@@ -1350,23 +1351,28 @@ def _compute_current_expiry_live(expiry_iso: Optional[str] = None) -> Optional[d
         unrealized_pnl = sum(_sf(p.get("unrealisedPnl", 0)) for p in open_positions)
         total_pnl      = realized_pnl + unrealized_pnl
 
+        # Starting balance: use CYCLE_START_BALANCE only when it predates this expiry
+        # (i.e., was set by a PREVIOUS cycle). If it equals the current wallet balance it was
+        # just written for this cycle and would produce 0% — fall back to INITIAL_BALANCE.
         cycle_start_str = _env_get("CYCLE_START_BALANCE")
+        last_settled    = _env_get("LAST_SETTLED_EXPIRY")
+        use_cycle_start = bool(cycle_start_str) and last_settled != current_expiry_iso
         try:
-            starting_balance = float(cycle_start_str) if cycle_start_str else float(_env_get("INITIAL_BALANCE") or 531)
+            starting_balance = float(cycle_start_str) if use_cycle_start else float(_env_get("INITIAL_BALANCE") or 531)
         except ValueError:
             starting_balance = 531.0
 
         gain_pct = round(total_pnl / starting_balance * 100, 2) if starting_balance else 0
 
         return {
-            "expiry":            bybit_expiry,
-            "expiry_iso":        current_expiry_iso,
-            "realized_pnl":      round(realized_pnl,   4),
-            "unrealized_pnl":    round(unrealized_pnl,  4),
-            "total_pnl":         round(total_pnl,       4),
-            "starting_balance":  starting_balance,
-            "gain_pct":          gain_pct,
-            "is_live":           len(open_positions) > 0,
+            "expiry":             bybit_expiry,
+            "expiry_iso":         current_expiry_iso,
+            "realized_pnl":       round(realized_pnl,   4),
+            "unrealized_pnl":     round(unrealized_pnl,  4),
+            "total_pnl":          round(total_pnl,       4),
+            "starting_balance":   starting_balance,
+            "gain_pct":           gain_pct,
+            "is_live":            len(open_positions) > 0,
             "all_positions_flat": len(open_positions) == 0,
         }
     except Exception as e:
