@@ -71,17 +71,23 @@ function Sparkline({ entries }: { entries: GainEntry[] }) {
 const CARD_W = 540
 
 function ShareCard({
-  entries, stats, current, format, innerRef,
+  entries, stats, current, format, innerRef, overrideGainPct,
 }: {
-  entries:   GainEntry[]
-  stats:     GainsData['stats']
-  current:   CurrentExpiryGain | null
-  format:    'square' | 'story'
-  innerRef?: React.Ref<HTMLDivElement>
+  entries:          GainEntry[]
+  stats:            GainsData['stats']
+  current:          CurrentExpiryGain | null
+  format:           'square' | 'story'
+  innerRef?:        React.Ref<HTMLDivElement>
+  overrideGainPct?: number
 }) {
   const isStory = format === 'story'
   const cardH   = isStory ? 960 : CARD_W
-  const curGain = current?.gain_pct ?? 0
+  // Share card always shows gain vs initial balance, but respects user override
+  const curGain = overrideGainPct ?? (
+    current && stats.initial_balance
+      ? parseFloat(((current.total_pnl / stats.initial_balance) * 100).toFixed(2))
+      : current?.gain_pct ?? 0
+  )
   const isNeg   = curGain < 0
   const allTime = stats.all_time_gain_pct
   const sinceL  = stats.launch_gain_pct
@@ -423,6 +429,14 @@ function ShareModal({
   const [downloading, setDL]      = useState(false)
   const cardRef = useRef<HTMLDivElement>(null)
 
+  // Editable gain% — pre-filled from total_pnl / initial_balance (ephemeral, not stored)
+  const defaultGain = current && stats.initial_balance
+    ? parseFloat(((current.total_pnl / stats.initial_balance) * 100).toFixed(2))
+    : current?.gain_pct ?? 0
+  const [editGain, setEditGain]   = useState<string>(String(defaultGain))
+  const parsedGain = parseFloat(editGain)
+  const gainValid  = !isNaN(parsedGain)
+
   const isStory  = format === 'story'
   const cardH    = isStory ? 960 : CARD_W
   const scale    = isStory ? 260 / CARD_W : 380 / CARD_W
@@ -464,11 +478,31 @@ function ShareModal({
           ))}
         </div>
 
+        {/* Editable return — ephemeral, only affects the share card */}
+        <div className="flex items-center gap-2">
+          <span className="text-[11px] text-muted font-mono flex-shrink-0">Current expiry return on card:</span>
+          <div className="relative flex items-center">
+            <input
+              type="number"
+              step="0.01"
+              value={editGain}
+              onChange={e => setEditGain(e.target.value)}
+              className={`font-mono text-xs px-2 py-1 rounded border bg-s2 w-24 text-right ${gainValid ? (parsedGain >= 0 ? 'text-green border-green/30' : 'text-red border-red/30') : 'text-muted border-border'}`}
+            />
+            <span className="absolute right-2 text-[10px] text-muted pointer-events-none">%</span>
+          </div>
+          {editGain !== String(defaultGain) && (
+            <button onClick={() => setEditGain(String(defaultGain))}
+              className="text-[10px] text-muted hover:text-tx underline flex-shrink-0">reset</button>
+          )}
+        </div>
+
         {/* Scaled preview — wrap to exact scaled dimensions so clip is clean */}
         <div style={{ display: 'flex', justifyContent: 'center' }}>
           <div style={{ width: Math.round(CARD_W * scale), height: previewH, overflow: 'hidden', flexShrink: 0 }}>
             <div style={{ transform: `scale(${scale})`, transformOrigin: 'top left', width: CARD_W, flexShrink: 0 }}>
-              <ShareCard entries={entries} stats={stats} current={current} format={format} innerRef={cardRef} />
+              <ShareCard entries={entries} stats={stats} current={current} format={format} innerRef={cardRef}
+                overrideGainPct={gainValid ? parsedGain : undefined} />
             </div>
           </div>
         </div>
@@ -599,24 +633,34 @@ export default function Performance() {
               </span>
             )}
           </div>
-          {cur && !cur.error ? (
-            <>
-              <div className={`font-mono text-3xl font-bold leading-none ${pctClass(cur.gain_pct)}`}>
-                {fmtPct(cur.gain_pct, true)}
-              </div>
-              <div className="text-[11px] text-muted mt-2 font-mono space-y-0.5">
-                <div>
-                  {cur.expiry} &nbsp;·&nbsp;
-                  <span className={cur.total_pnl >= 0 ? 'text-green' : 'text-red'}>
-                    {cur.total_pnl >= 0 ? '+' : '−'}${Math.abs(cur.total_pnl).toFixed(2)}
-                  </span>
+          {cur && !cur.error ? (() => {
+            const gainVsCycle   = cur.gain_pct  // already cycle-start based
+            const gainVsInitial = stats.initial_balance
+              ? parseFloat(((cur.total_pnl / stats.initial_balance) * 100).toFixed(2))
+              : gainVsCycle
+            return (
+              <>
+                <div className={`font-mono text-3xl font-bold leading-none ${pctClass(gainVsCycle)}`}>
+                  {fmtPct(gainVsCycle, true)}
                 </div>
-                <div className="text-[10px]">
-                  R: ${cur.realized_pnl.toFixed(2)} · U: ${cur.unrealized_pnl.toFixed(2)}
+                <div className="text-[11px] text-muted mt-1.5 font-mono space-y-0.5">
+                  <div className="flex items-center gap-1.5">
+                    <span className={`text-[10px] ${pctClass(gainVsInitial)}`}>
+                      {fmtPct(gainVsInitial, true)}
+                    </span>
+                    <span className="text-[9px] text-muted2">vs initial</span>
+                    <span className="text-muted2 text-[9px]">·</span>
+                    <span className={cur.total_pnl >= 0 ? 'text-green text-[10px]' : 'text-red text-[10px]'}>
+                      {cur.total_pnl >= 0 ? '+' : '−'}${Math.abs(cur.total_pnl).toFixed(2)}
+                    </span>
+                  </div>
+                  <div className="text-[10px]">
+                    {cur.expiry} · R: ${cur.realized_pnl.toFixed(2)} · U: ${cur.unrealized_pnl.toFixed(2)}
+                  </div>
                 </div>
-              </div>
-            </>
-          ) : (
+              </>
+            )
+          })() : (
             <div className="font-mono text-2xl font-bold text-muted">—</div>
           )}
         </div>
