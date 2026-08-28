@@ -247,8 +247,18 @@ async def handle_new_message(event):
 # ── Text-only fallback parser ─────────────────────────────────────────────────
 
 _MONTHS_MAP = {
-    "jan":"Jan","feb":"Feb","mar":"Mar","apr":"Apr","may":"May","jun":"Jun",
-    "jul":"Jul","aug":"Aug","sep":"Sep","oct":"Oct","nov":"Nov","dec":"Dec"
+    "jan":"Jan","january":"Jan",
+    "feb":"Feb","february":"Feb",
+    "mar":"Mar","march":"Mar",
+    "apr":"Apr","april":"Apr",
+    "may":"May",
+    "jun":"Jun","june":"Jun",
+    "jul":"Jul","july":"Jul",
+    "aug":"Aug","august":"Aug",
+    "sep":"Sep","sept":"Sep","september":"Sep",
+    "oct":"Oct","october":"Oct",
+    "nov":"Nov","november":"Nov",
+    "dec":"Dec","december":"Dec",
 }
 
 _NUM_TO_MON = {1:"Jan",2:"Feb",3:"Mar",4:"Apr",5:"May",6:"Jun",

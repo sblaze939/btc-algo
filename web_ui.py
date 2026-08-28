@@ -642,6 +642,17 @@ async def reset_api_expiry(_=Depends(auth)):
     return {"ok": True, "expiry": expiry, "days_until_expiry": days}
 
 
+class CurrentExpiryInput(BaseModel):
+    current_expiry: str
+
+@app.post("/api/settings/current-expiry")
+async def set_current_expiry(body: CurrentExpiryInput, _=Depends(auth)):
+    if not body.current_expiry:
+        return {"ok": False, "error": "current_expiry is required"}
+    _env_set("CURRENT_EXPIRY", body.current_expiry)
+    return {"ok": True, "current_expiry": body.current_expiry}
+
+
 # ── Portfolio / positions / journal ───────────────────────────────────────────
 
 def _live_allowed() -> bool:

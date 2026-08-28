@@ -130,8 +130,9 @@ def get_btc_option_instruments(api_key: str = None, api_secret: str = None) -> l
 
 def _parse_expiry(expiry_hint: str) -> str | None:
     """
-    Convert a human expiry string → Bybit format DDMMMYY (e.g. '21AUG26').
-    Accepts: '21 Aug 26', '21 Aug 2026', '21AUG26', 'Aug 21', etc.
+    Convert a human expiry string → Bybit format DMMMYY (e.g. '4SEP26', '21AUG26').
+    Accepts: '21 Aug 26', '21 Aug 2026', '21AUG26', 'Aug 21', '4 Sep', etc.
+    Days are NOT zero-padded — Bybit uses '4SEP26', not '04SEP26'.
     """
     if not expiry_hint:
         return None
@@ -139,9 +140,11 @@ def _parse_expiry(expiry_hint: str) -> str | None:
                "jul":"JUL","aug":"AUG","sep":"SEP","oct":"OCT","nov":"NOV","dec":"DEC"}
     import re
     s = expiry_hint.strip()
-    # Already in target format
-    if re.match(r"^\d{2}[A-Z]{3}\d{2}$", s):
-        return s
+    # Already in Bybit format (with or without leading zero)
+    if re.match(r"^\d{1,2}[A-Z]{3}\d{2}$", s):
+        # Normalise: strip leading zero on day
+        m = re.match(r"^0(\d[A-Z]{3}\d{2})$", s)
+        return m.group(1) if m else s
     # Try to extract day, month, year
     parts = re.findall(r"[A-Za-z]+|\d+", s)
     day = month_str = year_str = None
@@ -151,7 +154,7 @@ def _parse_expiry(expiry_hint: str) -> str | None:
         elif len(p) == 4 and p.isdigit():
             year_str = p[-2:]
         elif len(p) <= 2 and p.isdigit():
-            day = p.zfill(2)
+            day = str(int(p))  # no zero-pad: "04" → "4", "21" stays "21"
     if day and month_str:
         if not year_str:
             year_str = str(datetime.now(timezone.utc).year)[-2:]
@@ -159,15 +162,39 @@ def _parse_expiry(expiry_hint: str) -> str | None:
     return None
 
 
+def _expiry_in_symbol(bybit_expiry: str, symbol: str) -> bool:
+    """
+    Check whether bybit_expiry (e.g. '4SEP26') matches inside a symbol like
+    'BTC-4SEP26-64000-P-USDT'.  Handles both zero-padded and non-padded days.
+    Uses hyphen boundaries so '4SEP26' doesn't falsely match '14SEP26'.
+    """
+    if not bybit_expiry or not symbol:
+        return False
+    if f"-{bybit_expiry}-" in symbol:
+        return True
+    # Also check the zero-padded variant
+    m = re.match(r"^(\d)([A-Z]{3}\d{2})$", bybit_expiry)
+    if m:
+        return f"-0{m.group(1)}{m.group(2)}-" in symbol
+    # And the unpadded variant if we received a zero-padded string
+    m2 = re.match(r"^0(\d[A-Z]{3}\d{2})$", bybit_expiry)
+    if m2:
+        return f"-{m2.group(1)}-" in symbol
+    return False
+
+
 def find_option_symbol(strike: int, option_type: str, expiry_hint: str = None,
+                       strict: bool = False,
                        api_key: str = None, api_secret: str = None) -> str | None:
     """
     Resolve strike + option_type (+ optional expiry) to the correct BTC option symbol.
-    Prefers the expiry from the signal; falls back to nearest Friday.
     Symbol format: BTC-21AUG26-58000-P-USDT
+
+    strict=True  → explicit expiry given; return None if no exact contract found (no fallback).
+    strict=False → no explicit expiry; prefer CURRENT_EXPIRY, then nearest as last resort.
     """
     side = "P" if option_type.upper() in ("PE", "P") else "C"
-    target_expiry = _parse_expiry(expiry_hint)  # e.g. "21AUG26"
+    target_expiry = _parse_expiry(expiry_hint)  # e.g. "04SEP26" or None
 
     instruments = get_btc_option_instruments(api_key, api_secret)
 
@@ -177,20 +204,34 @@ def find_option_symbol(strike: int, option_type: str, expiry_hint: str = None,
         if inst["symbol"].endswith(f"-{side}-USDT") and str(strike) in inst["symbol"]
     ]
 
-    if candidates and target_expiry:
-        # Prefer exact expiry match from signal
-        exact = [c for c in candidates if target_expiry in c["symbol"]]
-        if exact:
-            log(f"Symbol (expiry-matched): {exact[0]['symbol']}")
-            return exact[0]["symbol"]
-
     if candidates:
-        # Nearest expiry
+        # 1. Exact match on explicit expiry
+        if target_expiry:
+            exact = [c for c in candidates if _expiry_in_symbol(target_expiry, c["symbol"])]
+            if exact:
+                log(f"Symbol (expiry-matched): {exact[0]['symbol']}")
+                return exact[0]["symbol"]
+            if strict:
+                log(f"ABORT: No {strike}{option_type} contract for explicit expiry {target_expiry} — refusing nearest fallback")
+                return None
+            # Non-strict explicit: fall through to CURRENT_EXPIRY / nearest
+
+        # 2. No explicit expiry → prefer CURRENT_EXPIRY before nearest
+        if not target_expiry:
+            cur = _get_current_expiry_date()
+            if cur:
+                cur_bybit = str(cur.day) + cur.strftime("%b%y").upper()  # e.g. "4SEP26"
+                cur_exact = [c for c in candidates if _expiry_in_symbol(cur_bybit, c["symbol"])]
+                if cur_exact:
+                    log(f"Symbol (CURRENT_EXPIRY match): {cur_exact[0]['symbol']}")
+                    return cur_exact[0]["symbol"]
+
+        # 3. Last resort: nearest expiry
         candidates.sort(key=lambda x: int(x.get("deliveryTime", "9999999999999")))
-        log(f"Symbol (nearest expiry): {candidates[0]['symbol']}")
+        log(f"Symbol (nearest expiry — verify manually): {candidates[0]['symbol']}")
         return candidates[0]["symbol"]
 
-    # Fallback: build from expiry hint or nearest Friday
+    # No candidates at all — build symbol string directly
     if target_expiry:
         expiry_str = target_expiry
     else:
@@ -219,11 +260,11 @@ def get_ticker(symbol: str, api_key: str = None, api_secret: str = None) -> dict
 # ── Expiry helpers ────────────────────────────────────────────────────────────
 
 def _parse_symbol_expiry_date(symbol: str):
-    """Extract expiry as date from symbol like BTC-22AUG26-68000-C-USDT."""
+    """Extract expiry as date from symbol like BTC-4SEP26-68000-C-USDT or BTC-22AUG26-..."""
     from datetime import date as _date
     MONTHS = {"JAN":1,"FEB":2,"MAR":3,"APR":4,"MAY":5,"JUN":6,"JUL":7,"AUG":8,"SEP":9,"OCT":10,"NOV":11,"DEC":12}
     import re as _re
-    m = _re.match(r"BTC-(\d{2})([A-Z]{3})(\d{2})-", symbol)
+    m = _re.match(r"BTC-(\d{1,2})([A-Z]{3})(\d{2})-", symbol)
     if not m:
         return None
     day, mon, yr = m.groups()
@@ -418,8 +459,14 @@ def place_option_order(signal: dict,
     expiry_src = signal.get("expiry_source", "unknown")
     log(f"Signal: {side} {lots}x {strike} {option_type}  expiry={expiry_hint or 'current'} ({expiry_src})", account_name)
 
-    symbol = find_option_symbol(strike, option_type, expiry_hint, api_key, api_secret)
+    # strict=True when the mentor explicitly stated an expiry — refuse nearest fallback
+    symbol = find_option_symbol(strike, option_type, expiry_hint,
+                                strict=(expiry_src == "explicit"),
+                                api_key=api_key, api_secret=api_secret)
     if not symbol:
+        if expiry_src == "explicit":
+            reason = f"No contract for {strike}{option_type} expiry={expiry_hint} — trade aborted (explicit expiry not found)"
+            alert_order_failed(account_name, f"{strike}{option_type}", reason)
         return False
 
     # ── Expiry gate ───────────────────────────────────────────────────────────
@@ -430,8 +477,15 @@ def place_option_order(signal: dict,
             log(f"SKIP: Contract expiry {symbol_expiry} < current expiry {current_expiry} — old contract", account_name)
             return False
         elif symbol_expiry > current_expiry:
-            log(f"New expiry detected ({symbol_expiry}). Auto-updating current expiry.", account_name)
-            _update_current_expiry(symbol_expiry.isoformat())
+            # Only auto-advance when the mentor explicitly stated this new expiry
+            # AND the resolved symbol actually matched it (not a fallback).
+            resolved_bybit = str(symbol_expiry.day) + symbol_expiry.strftime("%b%y").upper()
+            explicit_bybit = _parse_expiry(expiry_hint) if expiry_hint else None
+            if expiry_src == "explicit" and explicit_bybit and resolved_bybit == explicit_bybit:
+                log(f"New expiry detected via explicit signal ({symbol_expiry}). Auto-updating current expiry.", account_name)
+                _update_current_expiry(symbol_expiry.isoformat())
+            else:
+                log(f"WARN: {symbol} expiry {symbol_expiry} > CURRENT_EXPIRY {current_expiry} but signal had no explicit date — NOT auto-updating. Update CURRENT_EXPIRY in Settings if this is the new weekly expiry.", account_name)
 
     ticker = get_ticker(symbol, api_key, api_secret)
     if not ticker:
@@ -445,8 +499,12 @@ def place_option_order(signal: dict,
     # Sell at bid (collect premium); buy/exit at ask (pay to close)
     price = bid if side == "Sell" else ask
     if float(price) <= 0:
-        log(f"ERROR: Invalid price {price} for {symbol}", account_name)
-        return False
+        # Bid/ask can be 0 in thin markets — fall back to mark price
+        if float(mark) > 0:
+            log(f"Bid/Ask is 0 for {symbol}, using markPrice={mark} as reference — proceeding", account_name)
+        else:
+            log(f"ERROR: No price for {symbol} (bid/ask/mark all 0)", account_name)
+            return False
 
     log(f"Mark={mark}  Bid={bid}  Ask={ask}  → Market order", account_name)
 
