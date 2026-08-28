@@ -66,108 +66,263 @@ function Sparkline({ entries }: { entries: GainEntry[] }) {
   )
 }
 
-// ── Share image ───────────────────────────────────────────────────────────────
+// ── Share Card ────────────────────────────────────────────────────────────────
 
-function drawShareCard(
-  canvas: HTMLCanvasElement,
-  entries: GainEntry[],
-  stats: GainsData['stats'],
-  current: CurrentExpiryGain | null,
-  size: number,
-) {
-  canvas.width = size; canvas.height = size
-  const ctx = canvas.getContext('2d')!
-  const s   = size / 540
+const CARD_W = 540
 
-  ctx.fillStyle = '#0A0806'
-  ctx.fillRect(0, 0, size, size)
-
-  const grad = ctx.createLinearGradient(0, 0, size * 0.55, 0)
-  grad.addColorStop(0,   '#C9A23C')
-  grad.addColorStop(0.6, 'rgba(201,162,60,0.2)')
-  grad.addColorStop(1,   'transparent')
-  ctx.fillStyle = grad
-  ctx.fillRect(0, 0, size, 3 * s)
-
-  ctx.font      = `700 ${24 * s}px 'Space Grotesk', sans-serif`
-  ctx.fillStyle = '#EDE4D2'
-  ctx.fillText('Kirasha', 56 * s, 80 * s)
-  const bw = ctx.measureText('Kirasha').width
-  ctx.fillStyle = '#C9A23C'
-  ctx.fillText(' BTC Algo', 56 * s + bw, 80 * s)
-  ctx.font      = `400 ${11 * s}px 'Space Grotesk', sans-serif`
-  ctx.fillStyle = '#4A3422'
-  ctx.fillText('BTC Options — Weekly Performance', 56 * s, 100 * s)
-
-  const divider = (y: number) => {
-    ctx.strokeStyle = 'rgba(255,220,130,0.07)'
-    ctx.lineWidth   = 1 * s
-    ctx.beginPath(); ctx.moveTo(56 * s, y * s); ctx.lineTo(size - 56 * s, y * s); ctx.stroke()
-  }
-  divider(116)
-
-  const atg = stats.all_time_gain_pct
-  ctx.font      = `500 ${11 * s}px 'Space Grotesk', sans-serif`
-  ctx.fillStyle = '#7A6250'
-  ctx.fillText('ALL-TIME', 56 * s, 150 * s)
-  ctx.font      = `700 ${56 * s}px 'JetBrains Mono', monospace`
-  ctx.fillStyle = atg >= 0 ? '#5BBE72' : '#D45858'
-  ctx.fillText((atg >= 0 ? '+' : '−') + Math.abs(atg).toFixed(1) + '%', 56 * s, 218 * s)
-
-  divider(234)
-
-  const lX = 56 * s, rX = 300 * s
+function ShareCard({
+  entries, stats, current, format, innerRef,
+}: {
+  entries:   GainEntry[]
+  stats:     GainsData['stats']
+  current:   CurrentExpiryGain | null
+  format:    'square' | 'story'
+  innerRef?: React.Ref<HTMLDivElement>
+}) {
+  const isStory = format === 'story'
+  const cardH   = isStory ? 960 : CARD_W
   const curGain = current?.gain_pct ?? 0
-  const curDate = current?.expiry_iso ? fmtDate(current.expiry_iso) : '—'
-  const lgGain  = stats.launch_gain_pct
+  const isNeg   = curGain < 0
+  const allTime = stats.all_time_gain_pct
+  const sinceL  = stats.launch_gain_pct
 
-  ctx.font      = `500 ${10 * s}px 'Space Grotesk', sans-serif`
-  ctx.fillStyle = '#7A6250'
-  ctx.fillText('CURRENT EXPIRY', lX, 268 * s)
-  ctx.font      = `700 ${34 * s}px 'JetBrains Mono', monospace`
-  ctx.fillStyle = curGain >= 0 ? '#5BBE72' : '#D45858'
-  ctx.fillText((curGain >= 0 ? '+' : '−') + Math.abs(curGain).toFixed(2) + '%', lX, 306 * s)
-  ctx.font      = `400 ${10 * s}px 'Space Grotesk', sans-serif`
-  ctx.fillStyle = '#4A3422'
-  ctx.fillText(curDate, lX, 322 * s)
+  const MINT  = '#1FCC8C'
+  const GOLD  = '#C8A84B'
+  const RED   = '#F05252'
+  const LINE  = 'rgba(255,255,255,0.06)'
+  const GLOW  = isNeg ? '#2A0E0E' : '#1A3520'
+  const GLOW2 = isNeg ? 'rgba(60,12,12,0.55)' : 'rgba(20,60,30,0.5)'
+  const curC  = isNeg ? RED : MINT
 
-  ctx.font      = `500 ${10 * s}px 'Space Grotesk', sans-serif`
-  ctx.fillStyle = '#7A6250'
-  ctx.fillText('SINCE SEP 2', rX, 268 * s)
-  ctx.font      = `700 ${34 * s}px 'JetBrains Mono', monospace`
-  ctx.fillStyle = lgGain >= 0 ? '#5BBE72' : '#D45858'
-  ctx.fillText((lgGain >= 0 ? '+' : '−') + Math.abs(lgGain).toFixed(2) + '%', rX, 306 * s)
-  ctx.font      = `400 ${10 * s}px 'Space Grotesk', sans-serif`
-  ctx.fillStyle = '#4A3422'
-  ctx.fillText(`From ${fmtDate('2026-08-28')}`, rX, 322 * s)
+  const fmtG = (v: number) => (v >= 0 ? '+' : '−') + Math.abs(v).toFixed(2) + '%'
+  const fmtB = (v: number) => (v >= 0 ? '+' : '') + v.toFixed(1) + '%'
 
-  ctx.strokeStyle = 'rgba(255,220,130,0.07)'
-  ctx.lineWidth   = 1 * s
-  ctx.beginPath(); ctx.moveTo(280 * s, 248 * s); ctx.lineTo(280 * s, 336 * s); ctx.stroke()
+  // Real weekly bars from entries
+  const barData = entries.slice(-8)
+  const maxAbs  = Math.max(...barData.map(e => Math.abs(e.gain_pct)), 0.5)
+  const bars    = barData.map((e, i) => ({
+    h:    Math.max(8, Math.round((Math.abs(e.gain_pct) / maxAbs) * 90)),
+    pos:  e.gain_pct >= 0,
+    last: i === barData.length - 1,
+  }))
 
-  divider(370)
+  const p = (n: number): React.CSSProperties => ({ padding: n })
+  const abs: React.CSSProperties = { position: 'absolute' }
+  const none: React.CSSProperties = { pointerEvents: 'none' }
 
-  const statRow = [
-    { lbl: 'WIN RATE', val: stats.win_rate.toFixed(0) + '%', col: '#EDE4D2' },
-    { lbl: 'WEEKS',    val: String(stats.total_weeks),        col: '#EDE4D2' },
-  ]
-  const colW = (size - 112 * s) / 2
-  statRow.forEach((r, i) => {
-    const rx = 56 * s + i * colW
-    ctx.font      = `500 ${9 * s}px 'Space Grotesk', sans-serif`
-    ctx.fillStyle = '#4A3422'
-    ctx.fillText(r.lbl, rx, 400 * s)
-    ctx.font      = `600 ${22 * s}px 'JetBrains Mono', monospace`
-    ctx.fillStyle = r.col
-    ctx.fillText(r.val, rx, 426 * s)
-  })
+  return (
+    <div ref={innerRef} style={{
+      width: CARD_W, height: cardH, position: 'relative', overflow: 'hidden',
+      display: 'flex', flexDirection: 'column',
+      fontFamily: "'Barlow Condensed', 'Space Grotesk', system-ui, sans-serif",
+    }}>
+      {/* ── Background layers ── */}
+      <div style={{ ...abs, inset: 0, background: [
+        `radial-gradient(ellipse 65% 50% at 50% 46%, ${GLOW} 0%, transparent 68%)`,
+        `radial-gradient(ellipse 40% 30% at 80% 80%, ${GLOW2} 0%, transparent 60%)`,
+        `radial-gradient(ellipse 35% 25% at 10% 15%, rgba(200,168,75,0.04) 0%, transparent 65%)`,
+        `linear-gradient(180deg, #090E0B 0%, #0B150D 20%, #0F1E14 45%, #0B150D 80%, #090E0B 100%)`,
+      ].join(', ') }} />
+      <div style={{ ...abs, inset: 0, ...none, backgroundImage: [
+        'repeating-linear-gradient(-45deg, transparent 0px, transparent 34px, rgba(200,168,75,0.022) 34px, rgba(200,168,75,0.022) 35px)',
+        'repeating-linear-gradient(0deg, transparent 0px, transparent 18px, rgba(255,255,255,0.01) 18px, rgba(255,255,255,0.01) 19px)',
+        'repeating-linear-gradient(90deg, transparent 0px, transparent 28px, rgba(255,255,255,0.007) 28px, rgba(255,255,255,0.007) 29px)',
+      ].join(', ') }} />
 
-  ctx.font      = `400 ${9 * s}px 'Space Grotesk', sans-serif`
-  ctx.fillStyle = '#2A1E12'
-  ctx.fillText('Kirasha BTC Algo · Weekly Performance', 56 * s, 490 * s)
-  ctx.fillStyle = '#C9A23C'
-  const foot = 'kirasha.in'
-  ctx.fillText(foot, size - 56 * s - ctx.measureText(foot).width, 490 * s)
+      {/* ₿ watermark */}
+      <div style={{ ...abs, ...none, userSelect: 'none', zIndex: 1,
+        fontFamily: "'Barlow Condensed', sans-serif", fontWeight: 800,
+        fontSize: isStory ? 380 : 300, color: 'rgba(200,168,75,0.045)',
+        right: -30, top: '50%', transform: 'translateY(-52%) rotate(-8deg)', lineHeight: 1,
+      }}>₿</div>
+
+      {/* Corner brackets */}
+      {[
+        { top: 10, left: 10,  borderTop: '1px solid rgba(200,168,75,0.35)', borderLeft:  '1px solid rgba(200,168,75,0.35)' },
+        { top: 10, right: 10, borderTop: '1px solid rgba(200,168,75,0.2)',  borderRight: '1px solid rgba(200,168,75,0.2)' },
+        { bottom: 10, left: 10,  borderBottom: '1px solid rgba(200,168,75,0.2)',  borderLeft:  '1px solid rgba(200,168,75,0.2)' },
+        { bottom: 10, right: 10, borderBottom: '1px solid rgba(200,168,75,0.35)', borderRight: '1px solid rgba(200,168,75,0.35)' },
+      ].map((s, i) => <div key={i} style={{ ...abs, ...none, zIndex: 3, width: 16, height: 16, ...s }} />)}
+
+      {/* Gold diagonal slashes */}
+      {[
+        { height: 240, top: -20, right: 68, opacity: 1 },
+        { height: 170, top:  50, right: 42, opacity: 0.5 },
+        { height: 120, bottom: 80, right: 120, opacity: 0.25 },
+      ].map((s, i) => <div key={i} style={{ ...abs, ...none, zIndex: 2, width: 1,
+        background: 'linear-gradient(180deg, transparent, rgba(200,168,75,0.2), transparent)',
+        transform: 'rotate(-35deg)', transformOrigin: 'top center', ...s,
+      }} />)}
+
+      {/* Left accent bar */}
+      <div style={{ ...abs, ...none, zIndex: 3, left: 0, top: '20%', bottom: '20%', width: 2,
+        background: 'linear-gradient(180deg, transparent, rgba(200,168,75,0.18), transparent)',
+      }} />
+
+      {/* Cross marks */}
+      {[{ top: '42%', left: '18%' } as React.CSSProperties, { top: '68%', right: '22%' } as React.CSSProperties].map((pos, i) => (
+        <div key={i} style={{ ...abs, ...none, zIndex: 3, ...pos }}>
+          <div style={{ ...abs, width: 8, height: 1, top: 0, left: -4, background: 'rgba(200,168,75,0.2)' }} />
+          <div style={{ ...abs, width: 1, height: 8, top: -4, left:  0, background: 'rgba(200,168,75,0.2)' }} />
+        </div>
+      ))}
+
+      {/* Candlestick bars — real data */}
+      <svg style={{ ...abs, ...none, zIndex: 1, bottom: 0, left: 0, width: '100%', height: 120 }}
+        viewBox={`0 0 ${CARD_W} 110`} preserveAspectRatio="none">
+        {bars.map((bar, i) => {
+          const x     = 30 + i * 68
+          const bH    = Math.round(bar.h * 0.8)
+          const wH    = bar.h + 8
+          const baseY = 105
+          const fillC = bar.pos ? `rgba(31,204,140,${bar.last ? 0.45 : 0.22})` : `rgba(240,82,82,${bar.last ? 0.42 : 0.2})`
+          const strkC = bar.pos ? `rgba(31,204,140,${bar.last ? 0.65 : 0.35})` : `rgba(240,82,82,${bar.last ? 0.6 : 0.3})`
+          return (
+            <g key={i}>
+              <line x1={x} y1={baseY - wH} x2={x} y2={baseY} stroke={strkC} strokeWidth="1" />
+              <rect x={x - 7} y={baseY - bH} width="14" height={bH} fill={fillC} />
+            </g>
+          )
+        })}
+      </svg>
+
+      {/* Top gold bar */}
+      <div style={{ position: 'relative', zIndex: 3, height: 2, flexShrink: 0,
+        background: `linear-gradient(90deg, ${GOLD} 0%, rgba(200,168,75,0.15) 65%, transparent 100%)`,
+      }} />
+      {/* Bottom accent */}
+      <div style={{ ...abs, ...none, zIndex: 3, bottom: 0, left: 0, right: 0, height: 1,
+        background: 'linear-gradient(90deg, transparent, rgba(200,168,75,0.2), transparent)',
+      }} />
+
+      {/* ── Card content ── */}
+      <div style={{ position: 'relative', zIndex: 2, flex: 1, display: 'flex', flexDirection: 'column' }}>
+
+        {/* Header */}
+        <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between',
+          padding: '17px 24px 15px', borderBottom: `1px solid ${LINE}`, flexShrink: 0 }}>
+          <div>
+            <div style={{ fontFamily: "'Barlow Condensed', sans-serif", fontSize: 20, fontWeight: 800,
+              display: 'flex', alignItems: 'baseline', gap: 7 }}>
+              <span style={{ color: '#fff' }}>Kirasha</span>
+              <span style={{ color: GOLD }}>BTC Algo</span>
+            </div>
+            <div style={{ fontSize: 8, fontWeight: 500, letterSpacing: '0.13em',
+              textTransform: 'uppercase', color: 'rgba(255,255,255,0.38)', marginTop: 2 }}>
+              BTC Options — Weekly Performance
+            </div>
+          </div>
+          <div style={{ display: 'inline-flex', alignItems: 'center', gap: 6,
+            background: 'rgba(31,204,140,0.1)', border: '1px solid rgba(31,204,140,0.22)',
+            padding: '5px 11px', fontSize: 9, fontWeight: 600,
+            letterSpacing: '0.13em', textTransform: 'uppercase', color: MINT }}>
+            <div style={{ width: 5, height: 5, borderRadius: '50%', background: MINT }} />
+            Live
+          </div>
+        </div>
+
+        {/* All-time return */}
+        <div style={{ padding: isStory ? '24px 24px 22px' : '16px 24px 13px',
+          flexShrink: 0, borderBottom: `1px solid ${LINE}` }}>
+          <span style={{ fontSize: 8, fontWeight: 600, letterSpacing: '0.18em',
+            textTransform: 'uppercase', color: GOLD, display: 'block', marginBottom: 5 }}>
+            All-Time Return
+          </span>
+          <div style={{ fontFamily: "'Barlow Condensed', sans-serif",
+            fontSize: isStory ? 108 : 84, fontWeight: 800,
+            lineHeight: 0.88, letterSpacing: '-0.02em', color: MINT,
+            fontVariantNumeric: 'tabular-nums' }}>
+            {fmtB(allTime)}
+          </div>
+        </div>
+
+        {/* Current Expiry + Since Sep 2 */}
+        <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr',
+          flexShrink: 0, borderBottom: `1px solid ${LINE}` }}>
+          {[
+            { label: 'Current Expiry', val: fmtG(curGain), color: curC },
+            { label: 'Since Sep 2',    val: fmtG(sinceL),  color: sinceL >= 0 ? MINT : RED, right: true },
+          ].map(col => (
+            <div key={col.label} style={{
+              padding: isStory ? '20px 24px' : '13px 24px',
+              borderLeft: (col as any).right ? `1px solid ${LINE}` : undefined,
+            }}>
+              <span style={{ fontSize: 7.5, fontWeight: 600, letterSpacing: '0.16em',
+                textTransform: 'uppercase', color: 'rgba(255,255,255,0.42)',
+                display: 'block', marginBottom: 5 }}>{col.label}</span>
+              <span style={{ fontFamily: "'Barlow Condensed', sans-serif",
+                fontSize: isStory ? 40 : 30, fontWeight: 800,
+                color: col.color, display: 'block', lineHeight: 1,
+                fontVariantNumeric: 'tabular-nums' }}>{col.val}</span>
+            </div>
+          ))}
+        </div>
+
+        {/* Story-only mid section */}
+        {isStory && (
+          <div style={{ flex: 1, padding: '28px 24px 30px',
+            borderBottom: `1px solid ${LINE}`,
+            display: 'flex', flexDirection: 'column', justifyContent: 'center' }}>
+            <div style={{ fontFamily: "'Barlow Condensed', sans-serif",
+              fontSize: 56, fontWeight: 800, textTransform: 'uppercase',
+              lineHeight: 0.88, letterSpacing: '-0.01em', color: '#fff' }}>
+              Zero Emotion.<br /><span style={{ color: GOLD }}>Pure Alpha.</span>
+            </div>
+            <p style={{ fontSize: 12, fontWeight: 300, lineHeight: 1.7,
+              color: 'rgba(255,255,255,0.55)', marginTop: 14 }}>
+              AI analyses market conditions across 10 parameters and scores the
+              confidence of each setup — only executes when the threshold is met.
+            </p>
+            <div style={{ display: 'flex', flexWrap: 'wrap', gap: 7, marginTop: 20 }}>
+              {['Instant Execution', 'AI Scored', 'Risk Managed', 'Always On'].map(tag => (
+                <span key={tag} style={{ fontSize: 8.5, fontWeight: 600, letterSpacing: '0.13em',
+                  textTransform: 'uppercase', color: 'rgba(255,255,255,0.45)',
+                  border: '1px solid rgba(255,255,255,0.1)', padding: '5px 11px' }}>{tag}</span>
+              ))}
+            </div>
+          </div>
+        )}
+
+        {/* Win Rate + Weeks */}
+        <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr',
+          flex: isStory ? '0 0 auto' : 1 }}>
+          {[
+            { label: 'Win Rate',     val: stats.win_rate.toFixed(0) + '%', color: MINT },
+            { label: 'Weeks Traded', val: String(stats.total_weeks),       color: '#fff', right: true },
+          ].map(st => (
+            <div key={st.label} style={{
+              padding: isStory ? '22px 24px' : '0 24px',
+              display: 'flex', flexDirection: 'column', justifyContent: 'center',
+              borderLeft: (st as any).right ? `1px solid ${LINE}` : undefined,
+            }}>
+              <span style={{ fontSize: 7.5, fontWeight: 600, letterSpacing: '0.16em',
+                textTransform: 'uppercase', color: 'rgba(255,255,255,0.4)',
+                display: 'block', marginBottom: 5 }}>{st.label}</span>
+              <span style={{ fontFamily: "'Barlow Condensed', sans-serif",
+                fontSize: isStory ? 52 : 38, fontWeight: 800,
+                color: st.color, display: 'block', lineHeight: 1,
+                fontVariantNumeric: 'tabular-nums' }}>{st.val}</span>
+            </div>
+          ))}
+        </div>
+
+        {/* Footer */}
+        <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between',
+          padding: '11px 24px', borderTop: `1px solid ${LINE}`, flexShrink: 0 }}>
+          <div style={{ display: 'flex', alignItems: 'center', gap: 6,
+            fontSize: 7, fontWeight: 300, letterSpacing: '0.1em', color: 'rgba(255,255,255,0.28)' }}>
+            <span>BTC Options</span>
+            <span style={{ width: 2, height: 2, borderRadius: '50%', background: 'rgba(255,255,255,0.18)', display: 'inline-block' }} />
+            <span>Algo Trading</span>
+            <span style={{ width: 2, height: 2, borderRadius: '50%', background: 'rgba(255,255,255,0.18)', display: 'inline-block' }} />
+            <span>Managed</span>
+          </div>
+          <span style={{ fontFamily: "'Barlow Condensed', sans-serif",
+            fontSize: 13, fontWeight: 700, letterSpacing: '0.06em', color: GOLD }}>kirasha.in</span>
+        </div>
+      </div>
+    </div>
+  )
 }
 
 // ── Add Expiry Modal ──────────────────────────────────────────────────────────
@@ -264,24 +419,31 @@ function ShareModal({
   current: CurrentExpiryGain | null
   onClose: () => void
 }) {
-  const canvasRef = useRef<HTMLCanvasElement>(null)
+  const [format, setFormat]       = useState<'square' | 'story'>('square')
+  const [downloading, setDL]      = useState(false)
+  const cardRef = useRef<HTMLDivElement>(null)
 
-  useEffect(() => {
-    const canvas = canvasRef.current
-    if (!canvas) return
-    document.fonts.ready.then(() => drawShareCard(canvas, entries, stats, current, 540))
-  }, [entries, stats, current])
+  const isStory  = format === 'story'
+  const cardH    = isStory ? 960 : CARD_W
+  const scale    = isStory ? 260 / CARD_W : 380 / CARD_W
+  const previewH = Math.round(cardH * scale)
 
-  function download() {
-    const tmp   = document.createElement('canvas')
-    const today = new Date().toISOString().slice(0, 10)
-    document.fonts.ready.then(() => {
-      drawShareCard(tmp, entries, stats, current, 1080)
-      const a = document.createElement('a')
-      a.download = `kirafx-performance-${today}.png`
-      a.href = tmp.toDataURL('image/png')
+  async function download() {
+    const el = cardRef.current
+    if (!el || downloading) return
+    setDL(true)
+    try {
+      await document.fonts.ready
+      const h2c     = (await import('html2canvas')).default
+      const canvas  = await h2c(el, { scale: 2, useCORS: true, logging: false, backgroundColor: null })
+      const today   = new Date().toISOString().slice(0, 10)
+      const a       = document.createElement('a')
+      a.download    = `kirasha-perf-${today}-${format}.png`
+      a.href        = canvas.toDataURL('image/png')
       a.click()
-    })
+    } finally {
+      setDL(false)
+    }
   }
 
   return (
@@ -291,15 +453,32 @@ function ShareModal({
           <h3 className="font-semibold text-sm text-tx">Share Weekly Performance</h3>
           <button onClick={onClose} className="text-muted hover:text-tx text-xl leading-none">×</button>
         </div>
-        <div className="rounded-lg overflow-hidden border border-border aspect-square">
-          <canvas ref={canvasRef} style={{ width: '100%', height: '100%', display: 'block' }} />
+
+        {/* Format toggle */}
+        <div className="flex gap-2">
+          {(['square', 'story'] as const).map(f => (
+            <button key={f} onClick={() => setFormat(f)}
+              className={format === f ? 'btn-accent text-xs px-3 py-1' : 'btn-ghost text-xs px-3 py-1'}>
+              {f === 'square' ? 'Square Post' : 'Story 9:16'}
+            </button>
+          ))}
         </div>
+
+        {/* Scaled preview */}
+        <div style={{ display: 'flex', justifyContent: 'center', overflow: 'hidden', height: previewH }}>
+          <div style={{ transform: `scale(${scale})`, transformOrigin: 'top left', flexShrink: 0 }}>
+            <ShareCard entries={entries} stats={stats} current={current} format={format} innerRef={cardRef} />
+          </div>
+        </div>
+
         <p className="text-[11px] text-muted font-mono">
-          All-time · Current expiry · Since Sep 2 — exports 1080×1080 PNG
+          {isStory ? 'Story 9:16 — exports 1080×1920 PNG' : 'Square — exports 1080×1080 PNG'}
         </p>
         <div className="flex justify-end gap-2">
           <button onClick={onClose} className="btn-ghost text-xs px-3 py-1.5">Close</button>
-          <button onClick={download} className="btn-accent text-xs px-4 py-1.5">↓ Download 1080×1080</button>
+          <button onClick={download} disabled={downloading} className="btn-accent text-xs px-4 py-1.5">
+            {downloading ? 'Generating…' : `↓ Download ${isStory ? '1080×1920' : '1080×1080'}`}
+          </button>
         </div>
       </div>
     </div>
