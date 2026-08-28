@@ -464,10 +464,12 @@ function ShareModal({
           ))}
         </div>
 
-        {/* Scaled preview */}
-        <div style={{ display: 'flex', justifyContent: 'center', overflow: 'hidden', height: previewH }}>
-          <div style={{ transform: `scale(${scale})`, transformOrigin: 'top left', flexShrink: 0 }}>
-            <ShareCard entries={entries} stats={stats} current={current} format={format} innerRef={cardRef} />
+        {/* Scaled preview — wrap to exact scaled dimensions so clip is clean */}
+        <div style={{ display: 'flex', justifyContent: 'center' }}>
+          <div style={{ width: Math.round(CARD_W * scale), height: previewH, overflow: 'hidden', flexShrink: 0 }}>
+            <div style={{ transform: `scale(${scale})`, transformOrigin: 'top left', width: CARD_W, flexShrink: 0 }}>
+              <ShareCard entries={entries} stats={stats} current={current} format={format} innerRef={cardRef} />
+            </div>
           </div>
         </div>
 
@@ -492,8 +494,8 @@ const LAUNCH = '2026-08-28'
 export default function Performance() {
   const [data,      setData]      = useState<GainsData | null>(null)
   const [loading,   setLoading]   = useState(true)
-  const [showAdd,   setShowAdd]   = useState(false)
-  const [showShare, setShowShare] = useState(false)
+  const [showAdd,     setShowAdd]     = useState(false)
+  const [shareTarget, setShareTarget] = useState<GainEntry | 'live' | null>(null)
   const [view,      setView]      = useState<'all' | 'launch'>('all')
 
   const load = useCallback(async () => {
@@ -551,7 +553,7 @@ export default function Performance() {
             <span className="text-base leading-none">+</span> Add Expiry
           </button>
           <button
-            onClick={() => setShowShare(true)}
+            onClick={() => setShareTarget('live')}
             className="btn-ghost text-xs flex items-center gap-1.5"
             style={{ color: '#C9A23C', borderColor: 'rgba(201,162,60,0.25)' }}
           >
@@ -716,7 +718,7 @@ export default function Performance() {
                 rows.push(
                   <tr
                     key={e.expiry}
-                    className={`border-b border-border hover:bg-s2/50 transition-colors ${isBreak ? 'opacity-40' : ''}`}
+                    className={`group border-b border-border hover:bg-s2/50 transition-colors ${isBreak ? 'opacity-40' : ''}`}
                   >
                     <td className="px-4 py-2.5 font-semibold text-tx font-mono text-xs">
                       {fmtDate(e.expiry)}
@@ -743,12 +745,24 @@ export default function Performance() {
                       </span>
                     </td>
                     <td className="px-4 py-2.5">
-                      {!isBreak && (
-                        <div
-                          className={`h-[3px] rounded-full ${e.gain_pct >= 0 ? 'bg-green' : 'bg-red'}`}
-                          style={{ width: barW }}
-                        />
-                      )}
+                      <div className="flex items-center gap-2">
+                        {!isBreak && (
+                          <div
+                            className={`h-[3px] rounded-full ${e.gain_pct >= 0 ? 'bg-green' : 'bg-red'}`}
+                            style={{ width: barW }}
+                          />
+                        )}
+                        {!isBreak && (
+                          <button
+                            onClick={() => setShareTarget(e)}
+                            title="Share this week's card"
+                            className="ml-auto opacity-0 group-hover:opacity-100 transition-opacity text-muted hover:text-accent text-xs leading-none flex-shrink-0"
+                            style={{ fontSize: 13 }}
+                          >
+                            ↑
+                          </button>
+                        )}
+                      </div>
                     </td>
                   </tr>
                 )
@@ -774,9 +788,25 @@ export default function Performance() {
       )}
 
       {showAdd && <AddModal onClose={() => setShowAdd(false)} onAdded={load} />}
-      {showShare && (
-        <ShareModal entries={entries} stats={stats} current={cur} onClose={() => setShowShare(false)} />
-      )}
+      {shareTarget != null && (() => {
+        const shareCurrent: CurrentExpiryGain | null =
+          shareTarget === 'live'
+            ? cur
+            : {
+                expiry:             shareTarget.expiry,
+                expiry_iso:         shareTarget.expiry,
+                gain_pct:           shareTarget.gain_pct,
+                realized_pnl:       shareTarget.realized_usdt ?? shareTarget.gain_pct / 100 * (shareTarget.starting_balance ?? 531),
+                unrealized_pnl:     0,
+                total_pnl:          shareTarget.realized_usdt ?? shareTarget.gain_pct / 100 * (shareTarget.starting_balance ?? 531),
+                starting_balance:   shareTarget.starting_balance ?? 531,
+                is_live:            false,
+                all_positions_flat: true,
+              }
+        return (
+          <ShareModal entries={entries} stats={stats} current={shareCurrent} onClose={() => setShareTarget(null)} />
+        )
+      })()}
     </div>
   )
 }
