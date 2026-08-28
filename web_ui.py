@@ -1312,8 +1312,8 @@ def _compute_gains_stats(entries: list, initial_balance: float) -> dict:
     }
 
 
-def _compute_current_expiry_live() -> Optional[dict]:
-    """Live P&L for the current expiry cycle, filtered by expiry tag in symbol."""
+def _compute_current_expiry_live(expiry_iso: Optional[str] = None) -> Optional[dict]:
+    """Live P&L for a given (or the current env) expiry cycle, filtered by expiry tag in symbol."""
     if not _CS_OK:
         return None
     k = _env_get("COINSWITCH_API_KEY")
@@ -1321,7 +1321,7 @@ def _compute_current_expiry_live() -> Optional[dict]:
     if not k or not s:
         return None
 
-    current_expiry_iso = _env_get("CURRENT_EXPIRY") or _env_get("LIVE_FROM")
+    current_expiry_iso = expiry_iso or _env_get("CURRENT_EXPIRY") or _env_get("LIVE_FROM")
     if not current_expiry_iso:
         return None
 
@@ -1400,7 +1400,7 @@ async def _settlement_watcher():
 
 
 async def _auto_settle_check():
-    from datetime import date as _date
+    from datetime import date as _date, timedelta as _td
     if not _CS_OK:
         return
 
@@ -1411,21 +1411,35 @@ async def _auto_settle_check():
         expiry_date = _date.fromisoformat(current_expiry_iso)
     except ValueError:
         return
-    if _date.today() < expiry_date:
-        return  # Not yet expired
+
+    today = _date.today()
+
+    # Determine which expiry to settle:
+    # Normal case: CURRENT_EXPIRY has passed → settle it.
+    # Overlap case: on expiry day the bot may have already advanced CURRENT_EXPIRY to the
+    # NEXT week's expiry (because a next-week signal fired first). In that case today is
+    # exactly the PREVIOUS expiry (CURRENT_EXPIRY - 7 days) and we must settle that one.
+    if today >= expiry_date:
+        target_expiry_iso = current_expiry_iso
+    else:
+        prev_expiry = expiry_date - _td(days=7)
+        if today >= prev_expiry:
+            target_expiry_iso = prev_expiry.isoformat()
+        else:
+            return  # Nothing to settle yet
 
     data = _read_gains_file()
-    already_recorded = any(e["expiry"] == current_expiry_iso for e in data.get("entries", []))
+    already_recorded = any(e["expiry"] == target_expiry_iso for e in data.get("entries", []))
     if already_recorded:
         _advance_expiry_if_needed()
         return
 
-    # Wait until all current-expiry positions are flat
+    # Wait until all target-expiry positions are flat
     k = _env_get("COINSWITCH_API_KEY")
     s = _env_get("COINSWITCH_API_SECRET")
     if not k or not s:
         return
-    bybit_expiry = _cs_parse_expiry(current_expiry_iso)
+    bybit_expiry = _cs_parse_expiry(target_expiry_iso)
     if not bybit_expiry:
         return
     try:
@@ -1439,12 +1453,12 @@ async def _auto_settle_check():
     except Exception:
         return
 
-    live = _compute_current_expiry_live()
+    live = _compute_current_expiry_live(expiry_iso=target_expiry_iso)
     if not live or "error" in live:
         return
 
     entry = {
-        "expiry":           current_expiry_iso,
+        "expiry":           target_expiry_iso,
         "gain_pct":         live["gain_pct"],
         "type":             "algo",
         "source":           "auto",
@@ -1459,7 +1473,7 @@ async def _auto_settle_check():
     try:
         wallet = _fetch_wallet(k, s)
         _env_set("CYCLE_START_BALANCE", str(round(wallet["wallet_balance"], 4)))
-        _env_set("LAST_SETTLED_EXPIRY", current_expiry_iso)
+        _env_set("LAST_SETTLED_EXPIRY", target_expiry_iso)
     except Exception:
         pass
 
