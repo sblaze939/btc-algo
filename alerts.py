@@ -105,7 +105,7 @@ def alert_heartbeat(mode: str, accounts: list[str], prev_msg_id: int | None = No
     if prev_msg_id:
         delete_alert(prev_msg_id)
     return send_alert(
-        f"🟢 <b>KiraFX BTC Algo — Alive</b>\n"
+        f"🟢 <b>Kirasha BTC Algo — Alive</b>\n"
         f"Mode: {mode}\n"
         f"Accounts: {', '.join(accounts)}"
     )
