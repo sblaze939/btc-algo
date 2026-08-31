@@ -472,15 +472,31 @@ def parse_text_signal(text: str, inherit: dict = None) -> dict | None:
 
 # ── Main ──────────────────────────────────────────────────────────────────────
 
+_HEARTBEAT_ID_FILE = os.path.join(os.path.dirname(__file__), "logs", "heartbeat_msg_id")
+
+def _load_heartbeat_id() -> int | None:
+    try:
+        return int(open(_HEARTBEAT_ID_FILE).read().strip())
+    except Exception:
+        return None
+
+def _save_heartbeat_id(msg_id: int | None):
+    try:
+        if msg_id:
+            open(_HEARTBEAT_ID_FILE, "w").write(str(msg_id))
+    except Exception:
+        pass
+
 async def heartbeat():
     """Log + send Telegram alert every 15 min (deletes previous)."""
     from coinswitch_trader import DRY_RUN
     mode    = "DRY RUN" if DRY_RUN else "LIVE TRADING"
-    prev_id = None
+    prev_id = _load_heartbeat_id()
     while True:
         await asyncio.sleep(900)  # 15 min
         log(f"Heartbeat — bot alive | mode={mode} | accounts={[a['name'] for a in ACCOUNTS]}")
         prev_id = alert_heartbeat(mode, [a["name"] for a in ACCOUNTS], prev_msg_id=prev_id)
+        _save_heartbeat_id(prev_id)
 
 
 async def main():
