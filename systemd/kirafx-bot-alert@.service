@@ -1,0 +1,8 @@
+[Unit]
+Description=Crash alert for %i
+After=network.target
+
+[Service]
+Type=oneshot
+User=ubuntu
+ExecStart=/home/ubuntu/btc-options-bot/venv/bin/python /home/ubuntu/btc-options-bot/send_crash_alert.py crash

@@ -1,0 +1,21 @@
+[Unit]
+Description=BTC Options Algo
+After=network.target
+OnFailure=kirafx-bot-alert@%n.service
+
+[Service]
+Type=simple
+User=ubuntu
+WorkingDirectory=/home/ubuntu/btc-options-bot
+EnvironmentFile=/home/ubuntu/btc-options-bot/.env
+ExecStartPre=/bin/bash -c 'pgrep -f "python.*main\.py" | xargs -r kill -9; sleep 1; rm -f /home/ubuntu/btc-options-bot/session/telegram_session.session-journal'
+ExecStart=/home/ubuntu/btc-options-bot/venv/bin/python main.py
+ExecStartPost=/home/ubuntu/btc-options-bot/venv/bin/python /home/ubuntu/btc-options-bot/send_crash_alert.py restart
+Restart=on-failure
+RestartSec=30
+KillMode=control-group
+StandardOutput=append:/home/ubuntu/btc-options-bot/logs/trades.log
+StandardError=append:/home/ubuntu/btc-options-bot/logs/trades.log
+
+[Install]
+WantedBy=multi-user.target
