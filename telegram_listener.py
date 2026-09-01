@@ -2,7 +2,7 @@ import asyncio
 import json
 import os
 import re
-from datetime import datetime, date as _date
+from datetime import datetime, date as _date, timezone, timedelta
 from pathlib import Path
 
 from telethon import TelegramClient, events
@@ -23,6 +23,9 @@ CHANNEL_ID  = int(os.getenv("TELEGRAM_CHANNEL_ID"))
 SIGNAL_MODE = os.getenv("SIGNAL_MODE", "image").lower()  # image | text | both
 
 DOWNLOADS = Path("downloads")
+_IST = timezone(timedelta(hours=5, minutes=30))
+_orders_today: int = 0
+_orders_date: _date | None = None  # IST date when counter was last reset
 DOWNLOADS.mkdir(exist_ok=True)
 
 # Client is created inside main() to avoid Python 3.10+ event-loop issues at import time.
@@ -103,6 +106,8 @@ def _bybit_expiry_to_date(s: str):
 
 async def execute_signal_for_all_accounts(signal: dict):
     """Dispatch signal to all accounts — handles normal, full_exit, and close_all."""
+    global _orders_today
+    _orders_today += 1
     # Reload accounts fresh so runtime changes (skip_expiry, active toggle) apply immediately
     accounts = load_accounts()
     sig_expiry_parsed = _parse_expiry(signal.get("expiry_date", "") or "")
@@ -489,13 +494,19 @@ def _save_heartbeat_id(msg_id: int | None):
 
 async def heartbeat():
     """Log + send Telegram alert every 15 min (deletes previous)."""
+    global _orders_today, _orders_date
     from coinswitch_trader import DRY_RUN
     mode    = "DRY RUN" if DRY_RUN else "LIVE TRADING"
     prev_id = _load_heartbeat_id()
     while True:
         await asyncio.sleep(900)  # 15 min
-        log(f"Heartbeat — bot alive | mode={mode} | accounts={[a['name'] for a in ACCOUNTS]}")
-        prev_id = alert_heartbeat(mode, [a["name"] for a in ACCOUNTS], prev_msg_id=prev_id)
+        # Reset counter at IST midnight
+        today_ist = datetime.now(_IST).date()
+        if _orders_date != today_ist:
+            _orders_today = 0
+            _orders_date  = today_ist
+        log(f"Heartbeat — bot alive | mode={mode} | accounts={[a['name'] for a in ACCOUNTS]} | orders_today={_orders_today}")
+        prev_id = alert_heartbeat(mode, [a["name"] for a in ACCOUNTS], prev_msg_id=prev_id, orders_today=_orders_today)
         _save_heartbeat_id(prev_id)
 
 
