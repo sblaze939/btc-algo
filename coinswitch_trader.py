@@ -121,12 +121,21 @@ def activate_options_access(inr_amount: int = 5000,
 # ── Market data ───────────────────────────────────────────────────────────────
 
 def get_btc_option_instruments(api_key: str = None, api_secret: str = None) -> list:
-    result = _get("/v5/market/instruments-info", {
-        "category": "option",
-        "baseCoin": "BTC",
-        "status":   "Trading",
-    }, api_key, api_secret)
-    return result.get("result", {}).get("list", [])
+    # Bybit returns max 1000 instruments per page — must paginate with cursor
+    # or many contracts (e.g. higher strikes) are silently missing.
+    all_instruments: list = []
+    cursor: str = ""
+    while True:
+        params = {"category": "option", "baseCoin": "BTC", "status": "Trading", "limit": 1000}
+        if cursor:
+            params["cursor"] = cursor
+        result = _get("/v5/market/instruments-info", params, api_key, api_secret)
+        batch = result.get("result", {}).get("list", [])
+        all_instruments.extend(batch)
+        cursor = result.get("result", {}).get("nextPageCursor", "")
+        if not cursor or not batch:
+            break
+    return all_instruments
 
 
 def _parse_expiry(expiry_hint: str) -> str | None:
@@ -222,24 +231,10 @@ def find_option_symbol(strike: int, option_type: str, expiry_hint: str = None,
                 log(f"Symbol (expiry-matched): {exact[0]['symbol']}")
                 return exact[0]["symbol"]
             if strict:
-                # Exact strike not listed for this expiry.
-                # Try nearest available strike at the SAME expiry (within 10K) before aborting.
-                def _sym_strike(sym: str) -> int:
-                    m2 = re.search(rf"-(\d+)-{side}-", sym)
-                    return int(m2.group(1)) if m2 else 999_999_999
-                same_expiry = sorted(
-                    [c for c in instruments
-                     if _expiry_in_symbol(target_expiry, c["symbol"])
-                     and c["symbol"].endswith(f"-{side}-USDT")],
-                    key=lambda c: abs(_sym_strike(c["symbol"]) - strike)
-                )
-                if same_expiry:
-                    nearest_strike = _sym_strike(same_expiry[0]["symbol"])
-                    delta = abs(nearest_strike - strike)
-                    if delta <= 10_000:
-                        log(f"Strike {strike} not listed for {target_expiry} — using nearest available: {nearest_strike} (delta {delta})")
-                        return same_expiry[0]["symbol"]
-                log(f"ABORT: No {strike}{option_type} contract for explicit expiry {target_expiry} and no usable nearby strike")
+                # Exact contract not found — expiry or strike might be a typo.
+                # Never fall back to a different strike when expiry was explicit.
+                # Log clearly and abort; the mentor should re-send a corrected signal.
+                log(f"ABORT: {strike}{option_type} not found for explicit expiry {target_expiry} — possible typo, no order placed")
                 return None
             # Non-strict explicit: fall through to CURRENT_EXPIRY / nearest
 
