@@ -6,6 +6,7 @@ Auth: Ed25519 signature (pynacl)
 import json
 import math
 import os
+import re
 import time
 import uuid
 import urllib.parse
