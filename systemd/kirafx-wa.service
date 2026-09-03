@@ -1,0 +1,18 @@
+[Unit]
+Description=Kirasha WA Bridge — WhatsApp to Telegram forwarder
+After=network.target kirafx-bot.service
+
+[Service]
+Type=simple
+User=ubuntu
+WorkingDirectory=/home/ubuntu/btc-options-bot
+EnvironmentFile=/home/ubuntu/btc-options-bot/.env
+ExecStart=/usr/bin/node /home/ubuntu/btc-options-bot/wa_bridge.js
+Restart=on-failure
+RestartSec=15
+KillMode=control-group
+StandardOutput=append:/home/ubuntu/btc-options-bot/logs/wa_bridge.log
+StandardError=append:/home/ubuntu/btc-options-bot/logs/wa_bridge.log
+
+[Install]
+WantedBy=multi-user.target
