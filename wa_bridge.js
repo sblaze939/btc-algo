@@ -289,6 +289,7 @@ async function connect() {
         auth:                state,
         logger:              pino({ level: 'silent' }),
         keepAliveIntervalMs: 30_000,
+        markOnlineOnConnect: false,   // don't appear "active" so phone keeps getting notifications
     })
 
     sock.ev.on('creds.update', saveCreds)
