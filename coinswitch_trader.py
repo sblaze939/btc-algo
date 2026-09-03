@@ -514,23 +514,28 @@ def place_option_order(signal: dict,
     current_expiry = _get_current_expiry_date()
     if symbol_expiry and current_expiry:
         if symbol_expiry < current_expiry:
-            reason = f"Contract expiry {symbol_expiry} is before current expiry {current_expiry} — old contract, no order placed"
-            log(f"SKIP: {reason}", account_name)
-            alert_order_failed(account_name, symbol, reason)
-            return False
+            if expiry_src == "explicit":
+                # Mentor explicitly named an older expiry (e.g. closing a carried position).
+                # Execute as requested — do NOT update current_expiry.
+                log(f"Explicit expiry {symbol_expiry} < current {current_expiry} — executing as requested, current expiry unchanged", account_name)
+            else:
+                # Old contract resolved without an explicit date — abort, do not execute.
+                reason = f"Contract expiry {symbol_expiry} < current expiry {current_expiry} — old contract, no order placed"
+                log(f"SKIP: {reason}", account_name)
+                alert_order_failed(account_name, symbol, reason)
+                return False
         elif symbol_expiry > current_expiry:
-            # Only auto-advance when the mentor explicitly stated this new expiry
-            # AND the resolved symbol actually matched it (not a fallback).
-            resolved_bybit = str(symbol_expiry.day) + symbol_expiry.strftime("%b%y").upper()
-            explicit_bybit = _parse_expiry(expiry_hint) if expiry_hint else None
-            if expiry_src == "explicit" and explicit_bybit and resolved_bybit == explicit_bybit:
-                log(f"New expiry detected via explicit signal ({symbol_expiry}). Auto-updating current expiry.", account_name)
+            if expiry_src == "explicit":
+                # Mentor explicitly stated a new/upcoming expiry — execute and advance current_expiry.
+                log(f"Explicit new expiry {symbol_expiry} — executing and updating current expiry", account_name)
                 _update_current_expiry(symbol_expiry.isoformat())
             else:
-                reason = f"{symbol} expiry {symbol_expiry} is ahead of current expiry {current_expiry} but signal had no explicit date — update Current Expiry in Settings first, then re-send signal"
+                # Future-expiry contract resolved without explicit date — abort.
+                reason = f"Contract {symbol} expiry {symbol_expiry} is ahead of current expiry {current_expiry} — signal had no explicit date; update Current Expiry in Settings first"
                 log(f"ABORT: {reason}", account_name)
                 alert_order_failed(account_name, symbol, reason)
                 return False
+        # symbol_expiry == current_expiry → execute normally, current_expiry unchanged
 
     ticker = get_ticker(symbol, api_key, api_secret)
     if not ticker:
