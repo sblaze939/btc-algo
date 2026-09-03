@@ -236,9 +236,10 @@ async function handleSignal(text, imageBuffer) {
     const parsed = parseSignalText(text)
     log(`Parsed: confidence=${parsed.confidence} signal=${formatSignal(parsed)}`)
 
-    // Not a signal — forward raw text
+    // Not a signal — forward as-is (image+caption if available, else raw text)
     if (parsed.confidence === 'none') {
-        await tgText(text, false)
+        if (imageBuffer) await tgPhoto(imageBuffer, text)
+        else             await tgText(text, false)
         return
     }
 
@@ -377,11 +378,19 @@ async function connect() {
             try {
                 if (m.imageMessage) {
                     log(`Image received${text ? ' + caption' : ''}`)
-                    const buf = await downloadMediaMessage(
-                        msg, 'buffer', {},
-                        { logger: pino({ level: 'silent' }), reuploadRequest: sock.updateMediaMessage }
-                    )
-                    await handleSignal(text, buf)
+                    let imgBuf = null
+                    try {
+                        imgBuf = await downloadMediaMessage(
+                            msg, 'buffer', {},
+                            { logger: pino({ level: 'silent' }), reuploadRequest: sock.updateMediaMessage }
+                        )
+                    } catch (dlErr) {
+                        // WA Channel posts don't carry the media key — image download always fails
+                        // for newsletter messages. Fall through with imgBuf=null so the caption
+                        // is still processed as a text signal.
+                        log(`Media download failed (${dlErr.message}) — processing caption only`)
+                    }
+                    await handleSignal(text, imgBuf)
                 } else if (text) {
                     log(`Text: ${text.slice(0, 80)}`)
                     await handleSignal(text, null)
