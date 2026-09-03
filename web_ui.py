@@ -244,8 +244,17 @@ def _uptime() -> Optional[int]:
     pid = _pid()
     if pid is not None:
         try:
-            # Use /proc/{pid} mtime as process creation time (Linux)
-            return int(time.time() - os.stat(f"/proc/{pid}").st_mtime)
+            # /proc/{pid}/stat field 22 (0-indexed 21) = starttime in clock ticks since boot.
+            # More reliable than /proc/{pid} mtime which changes on memory/fd events.
+            with open(f"/proc/{pid}/stat") as f:
+                fields = f.read().split()
+            starttime_ticks = int(fields[21])
+            hz = os.sysconf("SC_CLK_TCK")
+            with open("/proc/uptime") as f:
+                system_uptime = float(f.read().split()[0])
+            boot_time = time.time() - system_uptime
+            proc_start = boot_time + starttime_ticks / hz
+            return int(time.time() - proc_start)
         except Exception:
             pass
     # Fallback: scan trades.log for startup message
