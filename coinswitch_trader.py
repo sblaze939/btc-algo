@@ -503,8 +503,10 @@ def place_option_order(signal: dict,
                                 api_key=api_key, api_secret=api_secret)
     if not symbol:
         if expiry_src == "explicit":
-            reason = f"No contract for {strike}{option_type} expiry={expiry_hint} — trade aborted (explicit expiry not found)"
-            alert_order_failed(account_name, f"{strike}{option_type}", reason)
+            reason = f"No contract for {strike}{option_type} expiry={expiry_hint} — expiry or strike may be wrong, no order placed"
+        else:
+            reason = f"Could not resolve symbol for {strike}{option_type} — no order placed"
+        alert_order_failed(account_name, f"{strike}{option_type}", reason)
         return False
 
     # ── Expiry gate ───────────────────────────────────────────────────────────
@@ -512,7 +514,9 @@ def place_option_order(signal: dict,
     current_expiry = _get_current_expiry_date()
     if symbol_expiry and current_expiry:
         if symbol_expiry < current_expiry:
-            log(f"SKIP: Contract expiry {symbol_expiry} < current expiry {current_expiry} — old contract", account_name)
+            reason = f"Contract expiry {symbol_expiry} is before current expiry {current_expiry} — old contract, no order placed"
+            log(f"SKIP: {reason}", account_name)
+            alert_order_failed(account_name, symbol, reason)
             return False
         elif symbol_expiry > current_expiry:
             # Only auto-advance when the mentor explicitly stated this new expiry
@@ -523,7 +527,10 @@ def place_option_order(signal: dict,
                 log(f"New expiry detected via explicit signal ({symbol_expiry}). Auto-updating current expiry.", account_name)
                 _update_current_expiry(symbol_expiry.isoformat())
             else:
-                log(f"WARN: {symbol} expiry {symbol_expiry} > CURRENT_EXPIRY {current_expiry} but signal had no explicit date — NOT auto-updating. Update CURRENT_EXPIRY in Settings if this is the new weekly expiry.", account_name)
+                reason = f"{symbol} expiry {symbol_expiry} is ahead of current expiry {current_expiry} but signal had no explicit date — update Current Expiry in Settings first, then re-send signal"
+                log(f"ABORT: {reason}", account_name)
+                alert_order_failed(account_name, symbol, reason)
+                return False
 
     ticker = get_ticker(symbol, api_key, api_secret)
     if not ticker:

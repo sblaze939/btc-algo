@@ -377,23 +377,24 @@ async function connect() {
 
             try {
                 if (m.imageMessage) {
-                    log(`Image received${text ? ' + caption' : ''}`)
+                    log(`Image received${text ? ' + caption' : ''} — forwarding as-is`)
                     let imgBuf = null
                     try {
                         imgBuf = await downloadMediaMessage(
                             msg, 'buffer', {},
                             { logger: pino({ level: 'silent' }), reuploadRequest: sock.updateMediaMessage }
                         )
-                    } catch (dlErr) {
-                        // WA Channel posts don't carry the media key — image download always fails
-                        // for newsletter messages. Fall through with imgBuf=null so the caption
-                        // is still processed as a text signal.
-                        log(`Media download failed (${dlErr.message}) — processing caption only`)
+                    } catch (_) {
+                        // WA Channel posts don't carry the media key — image download always
+                        // fails for newsletter messages. Caption forwarded as plain text below.
+                        log('Media download failed (channel restriction) — caption forwarded as text')
                     }
-                    await handleSignal(text, imgBuf)
+                    if (imgBuf && text) await tgPhoto(imgBuf, text)
+                    else if (imgBuf)    await tgPhoto(imgBuf, '')
+                    else if (text)      await tgText(text, false)
                 } else if (text) {
-                    log(`Text: ${text.slice(0, 80)}`)
-                    await handleSignal(text, null)
+                    log(`Text — forwarding: ${text.slice(0, 80)}`)
+                    await tgText(text, false)
                 }
             } catch (e) {
                 log('Handle error:', e.message)
