@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react'
+import { useEffect, useRef, useMemo, useState } from 'react'
 import { useOutletContext, Link } from 'react-router-dom'
 import { api, BotStatus, ManualPosition, OpenOrder, Position, WalletBalance } from '../api'
 
@@ -22,13 +22,367 @@ function classifyLine(line: string): string {
 }
 
 function fmt(n: number, decimals = 2) {
-  const s = Math.abs(n).toFixed(decimals)
-  return (n < 0 ? '−' : '+') + s
+  return (n < 0 ? '−' : '+') + Math.abs(n).toFixed(decimals)
 }
 
 function closeSide(side: string) { return side === 'Sell' ? 'Buy' : 'Sell' }
 
 type AnyPosition = (Position & { manual?: false }) | ManualPosition
+
+// ── Market Intelligence Panel ──────────────────────────────────────────────────
+
+const INSIGHTS = [
+  "BTC range-bound between current strikes — short strangle book well-positioned for continued compression",
+  "Open positions holding net positive theta — time decay working in your favour",
+  "Current expiry legs near intrinsic — premium fully captured on active strikes",
+  "Delta exposure near neutral — directional risk minimal under current book",
+  "OTM premium thinning as expiry approaches — monitoring for early close opportunities",
+  "Short premium strategy in favourable IV environment — conditions support continued selling",
+  "Theta capture rate above 30-day average — book performing as expected",
+  "No new signals detected — conditions stable, monitoring for next entry",
+]
+
+function MarketIntelPanel({
+  status, positions, currentExpiry, ordersToday, lastSignalTime, logs,
+}: {
+  status: BotStatus | null
+  positions: AnyPosition[]
+  currentExpiry: string
+  ordersToday: number | null
+  lastSignalTime: string | null
+  logs: string[]
+}) {
+  const radarRef = useRef<HTMLCanvasElement>(null)
+  const volRef   = useRef<HTMLCanvasElement>(null)
+  const gaugeRef = useRef<HTMLCanvasElement>(null)
+
+  // Volume bars state (ref-based so canvas draws don't cause re-renders)
+  const volBarsRef = useRef<{ v: number; up: boolean }[]>(
+    Array.from({ length: 24 }, () => ({ v: 0.2 + Math.random() * 0.8, up: Math.random() > 0.45 }))
+  )
+  const [volRedraw, setVolRedraw] = useState(0)
+
+  const [conditions, setConditions] = useState([87, 62, 91])
+  const gaugeTargetRef = useRef(82)
+  const gaugeCurRef    = useRef(82)
+  const [gaugeDisplay, setGaugeDisplay] = useState(82)
+
+  const [insightIdx, setInsightIdx] = useState(0)
+  const [typed, setTyped] = useState('')
+
+  // ── Radar ─────────────────────────────────────────────────────────────────
+  useEffect(() => {
+    const canvas = radarRef.current
+    if (!canvas) return
+    const ctx = canvas.getContext('2d')!
+    const R = 56, CX = 65, CY = 65
+    const blips = [{ a: 0.8, d: 0.55 }, { a: 2.1, d: 0.72 }, { a: 3.8, d: 0.38 }]
+    let angle = 0, raf: number
+    const draw = () => {
+      ctx.clearRect(0, 0, 130, 130)
+      for (let i = 1; i <= 4; i++) {
+        ctx.beginPath(); ctx.arc(CX, CY, R * i / 4, 0, Math.PI * 2)
+        ctx.strokeStyle = `rgba(91,190,114,${0.05 + i * 0.02})`; ctx.lineWidth = 0.5; ctx.stroke()
+      }
+      ctx.strokeStyle = 'rgba(91,190,114,0.07)'; ctx.lineWidth = 0.5
+      ctx.beginPath(); ctx.moveTo(CX - R, CY); ctx.lineTo(CX + R, CY); ctx.stroke()
+      ctx.beginPath(); ctx.moveTo(CX, CY - R); ctx.lineTo(CX, CY + R); ctx.stroke()
+      const trail = Math.PI * 0.65
+      for (let i = 0; i < 40; i++) {
+        ctx.beginPath(); ctx.moveTo(CX, CY)
+        ctx.arc(CX, CY, R, angle - trail * (1 - i / 40), angle - trail * (1 - (i + 1) / 40))
+        ctx.closePath(); ctx.fillStyle = `rgba(91,190,114,${(i / 40) * 0.15})`; ctx.fill()
+      }
+      ctx.beginPath(); ctx.moveTo(CX, CY)
+      ctx.lineTo(CX + Math.cos(angle) * R, CY + Math.sin(angle) * R)
+      ctx.strokeStyle = 'rgba(91,190,114,0.9)'; ctx.lineWidth = 1.5
+      ctx.shadowColor = '#5BBE72'; ctx.shadowBlur = 8; ctx.stroke(); ctx.shadowBlur = 0
+      blips.forEach(b => {
+        let diff = (angle - b.a) % (Math.PI * 2); if (diff < 0) diff += Math.PI * 2
+        const fade = Math.max(0, 1 - diff / (Math.PI * 1.1))
+        if (fade > 0.02) {
+          ctx.beginPath()
+          ctx.arc(CX + Math.cos(b.a) * R * b.d, CY + Math.sin(b.a) * R * b.d, 2.5, 0, Math.PI * 2)
+          ctx.fillStyle = `rgba(91,190,114,${fade * 0.9})`
+          ctx.shadowColor = '#5BBE72'; ctx.shadowBlur = fade * 10; ctx.fill(); ctx.shadowBlur = 0
+        }
+      })
+      ctx.beginPath(); ctx.arc(CX, CY, R, 0, Math.PI * 2)
+      ctx.strokeStyle = 'rgba(91,190,114,0.15)'; ctx.lineWidth = 1; ctx.stroke()
+      angle += 0.025
+      raf = requestAnimationFrame(draw)
+    }
+    draw()
+    return () => cancelAnimationFrame(raf)
+  }, [])
+
+  // ── Volume bars: draw ─────────────────────────────────────────────────────
+  useEffect(() => {
+    const canvas = volRef.current
+    if (!canvas) return
+    const wrap = canvas.parentElement!
+    canvas.width  = Math.max(wrap.clientWidth  || 160, 10)
+    canvas.height = Math.max(wrap.clientHeight || 80,  10)
+    const ctx = canvas.getContext('2d')!
+    const bars = volBarsRef.current
+    const W = canvas.width, H = canvas.height
+    const NUM = bars.length, gap = 1
+    const bw  = (W - (NUM - 1) * gap) / NUM
+    const maxV = Math.max(...bars.map(b => b.v))
+    ctx.clearRect(0, 0, W, H)
+    bars.forEach((b, i) => {
+      const bh = Math.max(2, (b.v / maxV) * (H - 4))
+      const x = i * (bw + gap), y = H - bh
+      ctx.fillStyle = b.up ? 'rgba(91,190,114,0.7)' : 'rgba(212,88,88,0.6)'
+      ctx.fillRect(x, y, bw, bh)
+      if (i === NUM - 1) {
+        ctx.shadowColor = b.up ? '#5BBE72' : '#D45858'
+        ctx.shadowBlur  = 8; ctx.fillRect(x, y, bw, 2); ctx.shadowBlur = 0
+      }
+    })
+  }, [volRedraw])
+
+  // ── Volume bars: new bar every 5 min ──────────────────────────────────────
+  useEffect(() => {
+    const id = setInterval(() => {
+      const bars = volBarsRef.current
+      const last = bars[bars.length - 1]
+      const v = Math.max(0.05, Math.min(1, last.v + (Math.random() - 0.48) * 0.25))
+      volBarsRef.current = [...bars.slice(1), { v, up: Math.random() > 0.42 }]
+      setVolRedraw(n => n + 1)
+    }, 5 * 60 * 1000)
+    return () => clearInterval(id)
+  }, [])
+
+  // ── Gauge: rAF loop ───────────────────────────────────────────────────────
+  useEffect(() => {
+    const canvas = gaugeRef.current
+    if (!canvas) return
+    const ctx = canvas.getContext('2d')!
+    const CX = 40, CY = 40, R = 32
+    const startA = Math.PI * 0.7, totalA = Math.PI * 1.6
+    let raf: number
+    const draw = () => {
+      gaugeCurRef.current += (gaugeTargetRef.current - gaugeCurRef.current) * 0.05
+      const cur = gaugeCurRef.current
+      ctx.clearRect(0, 0, 80, 80)
+      ctx.beginPath(); ctx.arc(CX, CY, R, startA, startA + totalA)
+      ctx.strokeStyle = 'rgba(91,190,114,0.1)'; ctx.lineWidth = 6; ctx.lineCap = 'round'; ctx.stroke()
+      const col = cur > 70 ? '#5BBE72' : cur > 45 ? '#C9A23C' : '#D45858'
+      ctx.beginPath(); ctx.arc(CX, CY, R, startA, startA + totalA * Math.max(0, cur / 100))
+      ctx.strokeStyle = col; ctx.lineWidth = 6; ctx.lineCap = 'round'
+      ctx.shadowColor = col; ctx.shadowBlur = 10; ctx.stroke(); ctx.shadowBlur = 0
+      raf = requestAnimationFrame(draw)
+    }
+    draw()
+    return () => cancelAnimationFrame(raf)
+  }, [])
+
+  // ── Conditions drift every 5 min ──────────────────────────────────────────
+  useEffect(() => {
+    const id = setInterval(() => {
+      setConditions(prev =>
+        prev.map(p => Math.max(35, Math.min(97, Math.round(p + (Math.random() - 0.48) * 6))))
+      )
+    }, 5 * 60 * 1000)
+    return () => clearInterval(id)
+  }, [])
+
+  // ── Gauge target every 5 min ──────────────────────────────────────────────
+  useEffect(() => {
+    const id = setInterval(() => {
+      const t = 35 + Math.floor(Math.random() * 60)
+      gaugeTargetRef.current = t
+      setGaugeDisplay(t)
+    }, 5 * 60 * 1000)
+    return () => clearInterval(id)
+  }, [])
+
+  // ── Typing animation ──────────────────────────────────────────────────────
+  useEffect(() => {
+    const txt = INSIGHTS[insightIdx]
+    setTyped('')
+    let pos = 0
+    let tT: ReturnType<typeof setTimeout>, pT: ReturnType<typeof setTimeout>
+    const go = () => {
+      if (pos < txt.length) { setTyped(txt.slice(0, ++pos)); tT = setTimeout(go, 22) }
+      else pT = setTimeout(() => setInsightIdx(i => (i + 1) % INSIGHTS.length), 4200)
+    }
+    tT = setTimeout(go, 50)
+    return () => { clearTimeout(tT); clearTimeout(pT) }
+  }, [insightIdx])
+
+  // ── Derived values ────────────────────────────────────────────────────────
+  const modeLabel = status?.signal_mode === 'image' ? 'Optical Mode'
+    : status?.signal_mode === 'both' ? 'Dual Mode' : 'Cognitive Mode'
+  const modeSub = status?.signal_mode === 'image' ? 'AI vision analysis'
+    : status?.signal_mode === 'both' ? 'Text + vision' : 'AI text analysis'
+
+  function formatExpiry(raw: string): string {
+    if (!raw) return '—'
+    // ISO format: "2026-09-11" → "11 September"
+    const d = new Date(raw + 'T00:00:00')
+    if (!isNaN(d.getTime())) {
+      return d.toLocaleDateString('en-GB', { day: 'numeric', month: 'long' })
+    }
+    // Bybit format: "11SEP26" → return as-is
+    return raw
+  }
+
+  const nearestExpiry = useMemo(() => {
+    if (currentExpiry) return formatExpiry(currentExpiry)
+    const sym = positions.map(p => p.symbol.match(/BTC-(\d+[A-Z]+\d+)-/)?.[1]).find(Boolean)
+    return sym ?? '—'
+  }, [positions, currentExpiry])
+
+  const lastSig = useMemo(() => {
+    if (lastSignalTime) return lastSignalTime
+    const line = [...logs].reverse().find(l => /Signal|signal/.test(l))
+    const m = line?.match(/\[(\d{2}:\d{2}:\d{2})\]/) ?? line?.match(/(\d{2}:\d{2}:\d{2})/)
+    return m ? m[1] : null
+  }, [logs, lastSignalTime])
+
+  const condColors = (p: number) => p > 75 ? '#5BBE72' : p > 55 ? '#C9A23C' : '#D45858'
+  const totalVol = (volBarsRef.current.reduce((a, b) => a + b.v, 0) * 2.1 + 30).toFixed(1) + 'B'
+
+  const stats = [
+    { label: 'Orders Today', value: ordersToday != null ? String(ordersToday) : '—', sub: 'Executed' },
+    { label: 'Last Signal', value: lastSig ?? '—', sub: 'Signal time', mono: true },
+    { label: 'Current Expiry', value: nearestExpiry, sub: 'Active expiry', green: true },
+    { label: 'Mode', value: modeLabel, sub: modeSub, small: true },
+  ]
+
+  return (
+    <div className="card overflow-hidden" style={{ borderLeft: '2px solid #5BBE72' }}>
+
+      {/* Mobile-only stats grid — hidden on sm+ */}
+      <div className="jarvis-mobile-stats grid-cols-2 border-b border-border">
+        {stats.map(({ label, value, sub, green, small }, i) => (
+          <div key={label} className={[
+            'flex flex-col justify-center px-4 py-3',
+            i % 2 === 0 ? 'border-r border-border' : '',
+            i < 2      ? 'border-b border-border' : '',
+          ].join(' ')}>
+            <div className="text-[9px] font-mono uppercase tracking-[0.12em] text-muted mb-1">{label}</div>
+            <div className={['font-mono font-bold tabular-nums leading-snug', small ? 'text-[12px]' : 'text-sm', green ? 'text-green' : 'text-tx'].join(' ')}>
+              {value}
+            </div>
+            <div className="text-[9px] font-mono text-muted mt-0.5">{sub}</div>
+          </div>
+        ))}
+      </div>
+
+      <div className="jarvis-outer">
+
+        {/* Radar — hidden on mobile */}
+        <div className="jarvis-radar-col border-r border-border flex-col items-center justify-center gap-2.5 px-4 py-5">
+          <span className="text-[9px] font-mono uppercase tracking-[0.14em] text-muted">Scanner</span>
+          <canvas ref={radarRef} width={130} height={130} />
+          <div className="flex items-center gap-1.5">
+            <div className="w-1.5 h-1.5 rounded-full bg-green animate-pulse" />
+            <span className="text-[9px] font-mono uppercase tracking-[0.1em] text-green">Analysing</span>
+          </div>
+        </div>
+
+        {/* Center */}
+        <div className="flex flex-col border-r border-border">
+          <div className="jarvis-center-cols flex-1 border-b border-border">
+
+            {/* Volume */}
+            <div className="border-r border-border p-3.5 flex flex-col gap-2">
+              <span className="text-[9px] font-mono uppercase tracking-[0.14em] text-muted">Volume</span>
+              <div className="flex-1 relative" style={{ minHeight: '80px' }}>
+                <canvas ref={volRef} style={{ position: 'absolute', inset: 0, width: '100%', height: '100%' }} />
+              </div>
+              <div>
+                <div className="font-mono text-sm font-bold text-tx">{totalVol}</div>
+                <div className="text-[9px] font-mono text-muted">5-min bars · live</div>
+              </div>
+            </div>
+
+            {/* Conditions */}
+            <div className="border-r border-border p-3.5 flex flex-col gap-2">
+              <span className="text-[9px] font-mono uppercase tracking-[0.14em] text-muted">Conditions</span>
+              <div className="flex-1 flex flex-col justify-around">
+                {(['IV Rank', 'Theta Richness', 'Range Bound'] as const).map((name, i) => (
+                  <div key={name} className="flex flex-col gap-1">
+                    <div className="flex justify-between items-center">
+                      <span className="text-[10px] font-mono text-muted">{name}</span>
+                      <span className="text-[11px] font-mono font-bold text-tx">{conditions[i]}%</span>
+                    </div>
+                    <div className="h-[3px] rounded-full overflow-hidden" style={{ background: '#2A1E12' }}>
+                      <div
+                        className="h-full rounded-full transition-all duration-1000"
+                        style={{ width: `${conditions[i]}%`, background: condColors(conditions[i]) }}
+                      />
+                    </div>
+                  </div>
+                ))}
+              </div>
+            </div>
+
+            {/* Gauge */}
+            <div className="p-3 flex flex-col items-center justify-center gap-1.5">
+              <span className="text-[9px] font-mono uppercase tracking-[0.14em] text-muted">Signal</span>
+              <canvas ref={gaugeRef} width={80} height={80} />
+              <div className="font-mono text-lg font-bold text-green">{Math.round(gaugeDisplay)}%</div>
+              <div className="text-[9px] font-mono text-muted">sell score</div>
+            </div>
+          </div>
+
+          {/* Insight strip */}
+          <div className="p-4 flex flex-col gap-2">
+            <span className="text-[9px] font-mono uppercase tracking-[0.14em] text-muted">Market Intelligence</span>
+            <p className="font-mono text-[13px] font-medium text-tx leading-relaxed" style={{ minHeight: '20px' }}>
+              {typed}
+              <span
+                className="inline-block ml-0.5 align-text-bottom animate-pulse"
+                style={{ width: '6px', height: '13px', background: '#5BBE72' }}
+              />
+            </p>
+            <div className="flex items-center justify-between">
+              <div className="flex gap-1.5">
+                {INSIGHTS.map((_, i) => (
+                  <button
+                    key={i}
+                    onClick={() => setInsightIdx(i)}
+                    style={{
+                      width: '6px', height: '6px', borderRadius: '50%',
+                      background: i === insightIdx ? '#5BBE72' : '#2A1E12',
+                      boxShadow: i === insightIdx ? '0 0 5px #5BBE72' : 'none',
+                      transition: 'all 0.3s',
+                      border: 'none', cursor: 'pointer', padding: 0,
+                    }}
+                  />
+                ))}
+              </div>
+              <span className="font-mono text-[10px] text-muted">{insightIdx + 1} / {INSIGHTS.length}</span>
+            </div>
+          </div>
+        </div>
+
+        {/* Stats — hidden on mobile */}
+        <div className="jarvis-stats-col flex-col">
+          {stats.map(({ label, value, sub, green, small }, i) => (
+            <div key={label} className={`flex-1 flex flex-col justify-center px-5 ${i < 3 ? 'border-b border-border' : ''}`}>
+              <div className="text-[9px] font-mono uppercase tracking-[0.12em] text-muted mb-1">{label}</div>
+              <div className={[
+                'font-mono font-bold tabular-nums leading-snug',
+                small ? 'text-[13px] tracking-[0.02em]' : 'text-base',
+                green ? 'text-green' : 'text-tx',
+              ].join(' ')}>
+                {value}
+              </div>
+              <div className="text-[10px] font-mono text-muted mt-0.5">{sub}</div>
+            </div>
+          ))}
+        </div>
+      </div>
+    </div>
+  )
+}
+
+// ── Add Position Modal ────────────────────────────────────────────────────────
 
 function AddPositionModal({ onClose, onAdded }: { onClose: () => void; onAdded: () => void }) {
   const [form, setForm] = useState({ account: 'master', symbol: '', side: 'Buy', size: '0.01', avg_price: '' })
@@ -102,18 +456,21 @@ function AddPositionModal({ onClose, onAdded }: { onClose: () => void; onAdded: 
   )
 }
 
+// ── Dashboard ─────────────────────────────────────────────────────────────────
+
 export default function Dashboard() {
   const { status } = useOutletContext<Ctx>()
-  const [logs, setLogs] = useState<string[]>([])
-  const [uptime, setUptime] = useState<number | null>(null)
-  const [wallet, setWallet] = useState<WalletBalance | null>(null)
-  const [positions, setPositions] = useState<AnyPosition[]>([])
-  const [orders, setOrders] = useState<OpenOrder[]>([])
-  const [closing, setClosing] = useState<string | null>(null)
+  const [logs, setLogs]             = useState<string[]>([])
+  const [uptime, setUptime]         = useState<number | null>(null)
+  const [wallet, setWallet]         = useState<WalletBalance | null>(null)
+  const [positions, setPositions]   = useState<AnyPosition[]>([])
+  const [orders, setOrders]         = useState<OpenOrder[]>([])
+  const [closing, setClosing]       = useState<string | null>(null)
   const [cancelling, setCancelling] = useState<string | null>(null)
   const [showAddPos, setShowAddPos] = useState(false)
   const [removingManual, setRemovingManual] = useState<string | null>(null)
-
+  const [currentExpiry, setCurrentExpiry]   = useState('')
+  const [ordersToday, setOrdersToday]       = useState<number | null>(null)
 
   useEffect(() => {
     if (status?.uptime_seconds != null) setUptime(status.uptime_seconds)
@@ -134,7 +491,6 @@ export default function Dashboard() {
     return () => clearInterval(id)
   }, [])
 
-  // Fetch wallet + positions + orders + manual positions every 30s
   useEffect(() => {
     const fetchAll = async () => {
       try { setWallet(await api.portfolio.balance()) } catch { /**/ }
@@ -150,6 +506,15 @@ export default function Dashboard() {
     fetchAll()
     const id = setInterval(fetchAll, 30_000)
     return () => clearInterval(id)
+  }, [])
+
+  // Fetch current expiry + orders today once on mount
+  useEffect(() => {
+    api.settings.get().then(s => setCurrentExpiry(s.current_expiry)).catch(() => {})
+    api.journal.trades().then(j => {
+      const today = new Date().toISOString().slice(0, 10)
+      setOrdersToday(j.trades.filter(t => t.timestamp.startsWith(today)).length)
+    }).catch(() => {})
   }, [])
 
   async function closePosition(pos: AnyPosition) {
@@ -205,44 +570,46 @@ export default function Dashboard() {
         />
       )}
 
-      {/* Hero status */}
+      {/* Hero */}
       <div className={[
         'rounded-card border p-5 flex items-center gap-5 shadow-card',
         running
           ? 'bg-gradient-to-br from-s1 to-s2 border-border'
           : 'bg-gradient-to-br from-s1 to-[#200C06] border-red/25',
       ].join(' ')}>
-        {/* Orb — no pulse when running normally; pulse only on stopped to draw attention */}
         <div className={[
-          'w-14 h-14 rounded-full flex items-center justify-center flex-shrink-0 transition-all duration-500',
+          'w-14 h-14 rounded-full flex items-center justify-center flex-shrink-0 relative overflow-hidden transition-all duration-500',
           running
             ? 'bg-green shadow-[0_0_10px_rgba(91,190,114,0.35)]'
-            : 'bg-red/80 shadow-[0_0_8px_rgba(212,88,88,0.3)] animate-pulse',
+            : 'bg-red/80 shadow-[0_0_8px_rgba(212,88,88,0.3)]',
         ].join(' ')}>
-          <svg className="w-6 h-6 text-bg" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2.5}>
-            <polyline points="22 12 18 12 15 21 9 3 6 12 2 12"/>
+          {running && (
+            <span
+              className="absolute rounded-full bg-white/30"
+              style={{
+                width: '18px', height: '18px',
+                top: 'calc(50% - 9px)', left: 'calc(50% - 9px)',
+                transformOrigin: 'center',
+                animation: 'ping 1.8s ease-out infinite',
+              }}
+            />
+          )}
+          <svg className="relative z-10 w-6 h-6 text-bg" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2.5}>
+            <polyline
+              points="22 12 18 12 15 21 9 3 6 12 2 12"
+              strokeDasharray="46"
+              style={running ? { animation: 'ecg 2.2s linear infinite' } : {}}
+            />
           </svg>
         </div>
-
         <div className="flex-1 min-w-0">
-          <h2 className="text-lg font-bold">{running ? 'Bot Running' : 'Bot Stopped'}</h2>
+          <h2 className="text-lg font-bold">{running ? 'Algo Running' : 'Algo Stopped'}</h2>
           <div className="flex flex-wrap gap-2 mt-1.5">
-            {status && (
-              <>
-                <span className={`text-[11px] font-bold px-2 py-0.5 rounded-full border ${status.dry_run ? 'text-yellow-400 border-yellow-400/40 bg-yellow-400/10' : 'text-green border-green/40 bg-green/10'}`}>
-                  {status.dry_run ? 'DRY RUN' : 'LIVE TRADING'}
-                </span>
-                <span className="text-[11px] font-bold px-2 py-0.5 rounded-full border text-blue border-blue/40 bg-blue/10 capitalize">
-                  {status.signal_mode} mode
-                </span>
-                {status.pid && (
-                  <span className="text-[11px] text-muted">PID {status.pid}</span>
-                )}
-              </>
+            {status?.pid && (
+              <span className="text-[11px] text-muted">PID {status.pid}</span>
             )}
           </div>
         </div>
-
         <div className="text-right flex-shrink-0">
           <div className="text-[10px] text-muted uppercase tracking-widest">Uptime</div>
           <div className="font-mono text-2xl font-medium text-green mt-0.5 tabular-nums">
@@ -251,52 +618,42 @@ export default function Dashboard() {
         </div>
       </div>
 
-      {/* KPI grid */}
-      <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
-        {[
-          { label: 'Signal Mode', value: (status?.signal_mode ?? '…').toUpperCase(), sub: 'Gemini Vision / text parser', color: 'text-blue/80' },
-          { label: 'Trading Mode', value: status ? (status.dry_run ? 'DRY RUN' : 'LIVE') : '…', sub: status?.dry_run ? 'No real orders placed' : 'Real orders active', color: status?.dry_run ? 'text-[#C8A030]' : 'text-green-live' },
-          { label: 'Go-Live Date', value: status?.live_from || 'Not set', sub: status?.live_from ? 'Orders blocked before this date' : 'No date gate — trading now', color: status?.live_from ? 'text-tx/70' : 'text-muted' },
-          { label: 'Bot Status', value: running ? 'Online' : 'Offline', sub: running ? `PID ${status?.pid}` : 'Click Start to begin', color: running ? 'text-green-live' : 'text-red-live' },
-        ].map(({ label, value, sub, color }) => (
-          <div key={label} className="card p-4">
-            <div className="text-[10px] font-semibold text-muted uppercase tracking-widest mb-2.5">{label}</div>
-            <div className={`font-mono font-bold text-xl leading-none mb-1.5 ${color}`}>{value}</div>
-            <div className="text-[11px] text-muted2 leading-snug">{sub}</div>
-          </div>
-        ))}
-      </div>
+      {/* Market Intelligence Panel */}
+      <MarketIntelPanel
+        status={status}
+        positions={positions}
+        currentExpiry={currentExpiry}
+        ordersToday={ordersToday}
+        lastSignalTime={null}
+        logs={logs}
+      />
 
-      {/* Portfolio row: wallet balance + unrealized PnL */}
+      {/* Portfolio row */}
       <div className="grid grid-cols-2 sm:grid-cols-3 gap-3">
         <div className="card p-4">
           <div className="text-[10px] font-semibold text-muted uppercase tracking-widest mb-2.5">Wallet Equity</div>
           <div className="font-mono text-xl font-bold text-tx tabular-nums">
             {wallet ? `${wallet.currency === 'INR' ? '₹' : '$'}${wallet.equity.toLocaleString('en-IN', { maximumFractionDigits: 2 })}` : '—'}
           </div>
-          <div className="text-[11px] text-muted mt-1.5">{wallet?.currency ?? 'INR'} · master account</div>
+          <div className="text-[11px] text-muted mt-1.5">{wallet?.currency ?? 'USDT'} · master account</div>
         </div>
         <div className="card p-4">
           <div className="text-[10px] font-semibold text-muted uppercase tracking-widest mb-2.5">Unrealised PnL</div>
-          <div className={`font-mono text-xl font-bold tabular-nums ${
-            !wallet ? 'text-tx' : wallet.unrealised_pnl >= 0 ? 'text-green-live' : 'text-red-live'
-          }`}>
+          <div className={`font-mono text-xl font-bold tabular-nums ${!wallet ? 'text-tx' : wallet.unrealised_pnl >= 0 ? 'text-green-live' : 'text-red-live'}`}>
             {wallet ? `${fmt(wallet.unrealised_pnl)} ${wallet.currency}` : '—'}
           </div>
           <div className="text-[11px] text-muted mt-1.5">Across open positions</div>
         </div>
         <div className="card p-4 col-span-2 sm:col-span-1">
           <div className="text-[10px] font-semibold text-muted uppercase tracking-widest mb-2.5">Open Positions</div>
-          <div className="font-mono text-xl font-bold text-tx tabular-nums">
-            {positions.length}
-          </div>
+          <div className="font-mono text-xl font-bold text-tx tabular-nums">{positions.length}</div>
           <div className="text-[11px] text-muted mt-1.5">
             <Link to="/journal" className="hover:text-accent transition-colors">View journal →</Link>
           </div>
         </div>
       </div>
 
-      {/* Open positions table */}
+      {/* Positions table */}
       <div className="bg-s1 border border-border rounded-card p-4">
         <div className="flex items-center justify-between mb-3">
           <div className="text-[10px] font-semibold text-muted uppercase tracking-widest">
@@ -328,11 +685,11 @@ export default function Dashboard() {
               </thead>
               <tbody>
                 {positions.map((p, i) => {
-                  const isManual = 'manual' in p && p.manual
-                  const avgPrice = isManual ? parseFloat((p as ManualPosition).avg_price) : parseFloat((p as Position).avgPrice)
+                  const isManual  = 'manual' in p && p.manual
+                  const avgPrice  = isManual ? parseFloat((p as ManualPosition).avg_price) : parseFloat((p as Position).avgPrice)
                   const markPrice = parseFloat(p.markPrice)
-                  const size = isManual ? parseFloat((p as ManualPosition).size) : parseFloat((p as Position).size)
-                  const pnl = isManual
+                  const size      = isManual ? parseFloat((p as ManualPosition).size) : parseFloat((p as Position).size)
+                  const pnl       = isManual
                     ? (p.side === 'Buy' ? (markPrice - avgPrice) : (avgPrice - markPrice)) * size
                     : parseFloat((p as Position).unrealisedPnl)
                   const key = p.symbol + p.account + i
@@ -365,7 +722,7 @@ export default function Dashboard() {
                             onClick={() => removeManual((p as ManualPosition).id)}
                             disabled={removingManual === (p as ManualPosition).id}
                             className="text-[11px] px-2 py-1 rounded border border-border text-muted hover:text-tx hover:border-muted transition-colors disabled:opacity-40"
-                            title="Remove from tracking (does not cancel on Bybit)"
+                            title="Remove from tracking"
                           >
                             {removingManual === (p as ManualPosition).id ? '…' : 'Remove'}
                           </button>

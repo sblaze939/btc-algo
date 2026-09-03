@@ -113,34 +113,31 @@ export default function Layout() {
             Kirasha <span className="text-accent">BTC Algo</span>
           </span>
 
-          {/* Status — single static indicator, no pulse */}
+          {/* Status dot + label */}
           <div className="flex items-center gap-2">
-            <div className={[
-              'w-2 h-2 rounded-full flex-shrink-0 transition-colors',
-              running ? 'bg-green-live' : 'bg-red-live',
-            ].join(' ')} />
+            <span
+              className="w-2 h-2 rounded-full flex-shrink-0 transition-colors"
+              style={{
+                background: running ? '#6ECC84' : '#E06060',
+                boxShadow: running ? '0 0 6px #6ECC84' : 'none',
+                animation: running ? 'breathing 2s ease-in-out infinite' : 'none',
+              }}
+            />
             <span className="text-[13px] font-semibold">
               {status ? (running ? 'Running' : 'Stopped') : '…'}
             </span>
           </div>
 
-          {/* Mode chips — system-state vs signal mode use different visual grammar */}
+          {/* System-state chip only */}
           {status && (
-            <>
-              {/* System-state: pill with border, higher contrast */}
-              <span className={[
-                'chip-system',
-                status.dry_run
-                  ? 'text-[#C8A030] border-[#C8A030]/40 bg-[#C8A030]/8'
-                  : 'text-green border-green/40 bg-green/8',
-              ].join(' ')}>
-                {status.dry_run ? 'DRY RUN' : 'LIVE'}
-              </span>
-              {/* Signal mode: muted tag, clearly secondary */}
-              <span className="badge-data capitalize">
-                {status.signal_mode === 'image' ? '📷' : status.signal_mode === 'text' ? '✏️' : '⚡'} {status.signal_mode}
-              </span>
-            </>
+            <span className={[
+              'chip-system',
+              status.dry_run
+                ? 'text-[#C8A030] border-[#C8A030]/40 bg-[#C8A030]/8'
+                : 'text-green border-green/40 bg-green/8',
+            ].join(' ')}>
+              {status.dry_run ? 'DRY RUN' : 'LIVE'}
+            </span>
           )}
 
           <div className="flex-1" />
