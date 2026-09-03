@@ -1,17 +1,16 @@
 /**
  * Kirasha BTC Algo — WhatsApp Bridge
- * Phase 1: Monitor mentor's WA Channel → forward messages + images to Telegram alert channel.
+ * Phase 1: Monitor signal channel → parse + verify → forward to Telegram alert channel.
  *
  * Handles both WhatsApp Groups (@g.us) and WhatsApp Channels (@newsletter).
- * "Option selling by CR" is a Channel — its JID ends in @newsletter.
- *
  * First start: lists all followed channels so you can identify the right JID.
- * Once WA_SOURCE_JID is set in .env: only forwards from that source.
+ * Once WA_SOURCE_JID is set in .env: only processes messages from that source.
  *
- * Alerts sent to TELEGRAM_ALERT_CHAT_ID on:
- *   - Connected
- *   - Connection dropped (with reconnect)
- *   - Logged out (critical)
+ * Signal confidence logic:
+ *   High confidence text → forward parsed signal directly
+ *   Low confidence text + image → cross-verify via Gemini Vision → tag accordingly
+ *   Image only → Gemini extracts signal
+ *   Info/non-signal text → forward as-is
  */
 
 const {
@@ -20,6 +19,7 @@ const {
     downloadMediaMessage,
     DisconnectReason,
 } = require('@whiskeysockets/baileys')
+const { GoogleGenerativeAI } = require('@google/generative-ai')
 const pino   = require('pino')
 const qrcode = require('qrcode-terminal')
 const https  = require('https')
@@ -28,13 +28,13 @@ const fs     = require('fs')
 
 require('dotenv').config({ path: path.join(__dirname, '.env') })
 
-// WA_SOURCE_JID: JID of the mentor's WA channel or group to monitor
-const SOURCE_JID          = (process.env.WA_SOURCE_JID || process.env.WA_GROUP_JID || '').trim()
-const BOT_TOKEN           = process.env.TELEGRAM_BOT_TOKEN  || ''
-const ALERT_CHAT          = process.env.TELEGRAM_ALERT_CHAT_ID || ''
-const SESSION             = path.join(__dirname, 'wa_session')
-const HEARTBEAT_ID_FILE   = path.join(__dirname, 'logs', 'wa_heartbeat_msg_id')
-const HEARTBEAT_INTERVAL  = 15 * 60 * 1000  // 15 minutes
+const SOURCE_JID         = (process.env.WA_SOURCE_JID || process.env.WA_GROUP_JID || '').trim()
+const BOT_TOKEN          = process.env.TELEGRAM_BOT_TOKEN  || ''
+const ALERT_CHAT         = process.env.TELEGRAM_ALERT_CHAT_ID || ''
+const GEMINI_KEY         = process.env.GEMINI_API_KEY || ''
+const SESSION            = path.join(__dirname, 'wa_session')
+const HEARTBEAT_ID_FILE  = path.join(__dirname, 'logs', 'wa_heartbeat_msg_id')
+const HEARTBEAT_INTERVAL = 15 * 60 * 1000
 
 const ts  = () => new Date().toISOString().replace('T', ' ').slice(0, 19)
 const log = (...a) => console.log(`[${ts()}] [WA Bridge]`, ...a)
@@ -77,9 +77,11 @@ function tgPostPhoto(imgBuffer, caption) {
     })
 }
 
-async function tgText(text) {
-    if (!BOT_TOKEN || !ALERT_CHAT) return
-    const res = await tgPost('sendMessage', { chat_id: ALERT_CHAT, text, parse_mode: 'HTML' })
+async function tgText(text, html = true) {
+    if (!BOT_TOKEN || !ALERT_CHAT) return null
+    const body = { chat_id: ALERT_CHAT, text }
+    if (html) body.parse_mode = 'HTML'
+    const res = await tgPost('sendMessage', body)
     return res?.result?.message_id || null
 }
 
@@ -114,8 +116,6 @@ function nowIST() {
 async function sendHeartbeat() {
     const prevId = loadHeartbeatId()
     if (prevId) await tgDelete(prevId)
-
-    const sourceName = SOURCE_JID ? 'Option Selling by CR' : '⚠️ Not configured'
     const newId = await tgText(
         `🟢 <b>Kirasha Signal Watcher — Active</b>\n\n` +
         `🕐 ${nowIST()} IST\n` +
@@ -126,9 +126,159 @@ async function sendHeartbeat() {
     log('Heartbeat sent')
 }
 
+// ── Signal parsing ────────────────────────────────────────────────────────────
+
+const INFO_KEYWORDS = [
+    'fyi', 'reminder', 'heads up', 'watch out', 'today is expiry',
+    'expiry day', 'just info', 'incoming', 'expected', 'be careful',
+    'good morning', 'good evening', 'good night', 'happy',
+]
+
+function parseSignalText(text) {
+    const t = text.toLowerCase().trim()
+
+    if (INFO_KEYWORDS.some(k => t.includes(k))) return { confidence: 'none', raw: text }
+
+    let action = null
+    if (/\b(sell|short|add)\b/.test(t))              action = 'sell'
+    else if (/\b(buy|long|close|exit|book)\b/.test(t)) action = 'buy'
+
+    const lotsMatch = t.match(/(\d+)\s*(?:more\s+)?lots?/)
+    const lots = lotsMatch ? parseInt(lotsMatch[1]) : null
+
+    const strikeMatch = t.match(/(\d+(?:\.\d+)?)\s*k\b/i) || t.match(/\b(\d{4,6})\b/)
+    let strike = null
+    if (strikeMatch) {
+        const val = parseFloat(strikeMatch[1])
+        strike = val < 1000 ? Math.round(val * 1000) : Math.round(val)
+    }
+
+    let optionType = null
+    if (/\bpe\b|put/i.test(t))       optionType = 'PE'
+    else if (/\bce\b|call/i.test(t)) optionType = 'CE'
+
+    const fieldsFound = [action, lots, strike, optionType].filter(Boolean).length
+    const confidence  = fieldsFound === 4 ? 'high' : fieldsFound >= 2 ? 'low' : 'none'
+
+    return { action, lots, strike, optionType, confidence, raw: text }
+}
+
+function formatSignal(p) {
+    const action = p.action ? (p.action[0].toUpperCase() + p.action.slice(1)) : '?'
+    const lots   = p.lots   || '?'
+    const strike = p.strike ? (p.strike / 1000 + 'K') : '?'
+    const type   = p.optionType || '?'
+    return `${action} ${lots} × ${strike} ${type}`
+}
+
+// ── Gemini Vision ─────────────────────────────────────────────────────────────
+
+let _gemini = null
+function geminiModel() {
+    if (!_gemini) _gemini = new GoogleGenerativeAI(GEMINI_KEY)
+    return _gemini.getGenerativeModel({ model: 'gemini-2.0-flash' })
+}
+
+function imgPart(buffer) {
+    return { inlineData: { mimeType: 'image/jpeg', data: buffer.toString('base64') } }
+}
+
+function stripFences(s) {
+    return s.replace(/```(?:json)?\n?|\n?```/g, '').trim()
+}
+
+async function verifyWithGemini(imageBuffer, parsed) {
+    const strikeLabel = parsed.strike ? (parsed.strike / 1000 + 'K') : '?'
+    const typeLabel   = parsed.optionType === 'PE' ? 'Put' : parsed.optionType === 'CE' ? 'Call' : '?'
+    const prompt =
+        `BTC options positions screenshot.\n` +
+        `Signal to verify: SELL ${strikeLabel} ${typeLabel}\n\n` +
+        `Check if a Sell position matching strike ${parsed.strike || '?'} ${typeLabel} exists.\n` +
+        `Reply ONLY in raw JSON (no markdown):\n` +
+        `{"match_found":true/false,"matched_instrument":"exact name or null","image_strike":"strike seen or null","image_type":"Put/Call or null"}`
+    const result = await geminiModel().generateContent([prompt, imgPart(imageBuffer)])
+    return JSON.parse(stripFences(result.response.text()))
+}
+
+async function extractFromImage(imageBuffer) {
+    const prompt =
+        `BTC options positions screenshot.\n` +
+        `Identify the most prominent trade signal visible.\n` +
+        `Reply ONLY in raw JSON (no markdown):\n` +
+        `{"found":true/false,"action":"sell/buy/null","strike":number_or_null,"option_type":"PE/CE/null","lots":number_or_null}`
+    const result = await geminiModel().generateContent([prompt, imgPart(imageBuffer)])
+    const data = JSON.parse(stripFences(result.response.text()))
+    if (!data.found) return null
+    return { action: data.action, lots: data.lots, strike: data.strike, optionType: data.option_type }
+}
+
+// ── Signal handler ────────────────────────────────────────────────────────────
+
+async function handleSignal(text, imageBuffer) {
+    if (!text && !imageBuffer) return
+
+    // Image only — extract via Gemini
+    if (!text && imageBuffer) {
+        log('Image only — Gemini extraction')
+        try {
+            const extracted = await extractFromImage(imageBuffer)
+            const caption = extracted
+                ? `🔍 ${formatSignal(extracted)}\nSource: Image analysis`
+                : ''
+            await tgPhoto(imageBuffer, caption)
+        } catch (e) {
+            log('Gemini extraction error:', e.message)
+            await tgPhoto(imageBuffer, '')
+        }
+        return
+    }
+
+    const parsed = parseSignalText(text)
+    log(`Parsed: confidence=${parsed.confidence} signal=${formatSignal(parsed)}`)
+
+    // Not a signal — forward raw text
+    if (parsed.confidence === 'none') {
+        await tgText(text, false)
+        return
+    }
+
+    const signal = formatSignal(parsed)
+
+    // High confidence
+    if (parsed.confidence === 'high') {
+        const caption = `✅ ${signal}\nConfidence: High`
+        if (imageBuffer) await tgPhoto(imageBuffer, caption)
+        else             await tgText(caption, false)
+        return
+    }
+
+    // Low confidence, no image
+    if (!imageBuffer) {
+        await tgText(`⚠️ ${signal}\nConfidence: Low (no image to verify)`, false)
+        return
+    }
+
+    // Low confidence + image → cross-verify
+    log('Low confidence — cross-verifying with Gemini')
+    try {
+        const verify = await verifyWithGemini(imageBuffer, parsed)
+        if (verify.match_found) {
+            await tgPhoto(imageBuffer, `🔍 ${signal}\nConfidence: Low → Image confirmed ✓`)
+        } else {
+            const imgDetail = [verify.image_strike, verify.image_type].filter(Boolean).join(' ') || 'unclear'
+            const textDetail = `${parsed.strike ? parsed.strike / 1000 + 'K' : '?'} ${parsed.optionType || '?'}`
+            await tgPhoto(imageBuffer,
+                `⚠️ Signal conflict\nText: ${textDetail} · Image: ${imgDetail}\nManual review needed`)
+        }
+    } catch (e) {
+        log('Gemini verify error:', e.message)
+        await tgPhoto(imageBuffer, `🔍 ${signal}\nConfidence: Low (image verify failed)`)
+    }
+}
+
 // ── WhatsApp connection ───────────────────────────────────────────────────────
 
-let _lastDisconnectAlert = 0  // debounce disconnect alerts (max 1 per 60s)
+let _lastDisconnectAlert = 0
 let _heartbeatTimer      = null
 
 async function connect() {
@@ -153,7 +303,6 @@ async function connect() {
             log('Connected to WhatsApp ✓')
 
             if (!SOURCE_JID) {
-                // List followed channels so user can identify the right one
                 let channelLines = ''
                 try {
                     const newsletters = await sock.fetchAllNewsletters()
@@ -162,7 +311,6 @@ async function connect() {
                             newsletters.map(n => `• ${n.name || n.id}\n  <code>${n.id}</code>`).join('\n')
                     }
                 } catch (_) {}
-
                 log('WA_SOURCE_JID not set — listing channels')
                 await tgText(
                     '⚠️ <b>Signal Watcher — Source not configured</b>\n\n' +
@@ -172,7 +320,6 @@ async function connect() {
             } else {
                 const type = SOURCE_JID.endsWith('@newsletter') ? 'Channel' : 'Group'
                 log(`Monitoring ${type}: ${SOURCE_JID}`)
-                // Send first heartbeat immediately, then every 15 min
                 await sendHeartbeat()
                 if (_heartbeatTimer) clearInterval(_heartbeatTimer)
                 _heartbeatTimer = setInterval(sendHeartbeat, HEARTBEAT_INTERVAL)
@@ -182,7 +329,6 @@ async function connect() {
         if (connection === 'close') {
             const code = lastDisconnect?.error?.output?.statusCode
             log(`Disconnected (code ${code})`)
-
             if (_heartbeatTimer) { clearInterval(_heartbeatTimer); _heartbeatTimer = null }
 
             if (code === DisconnectReason.loggedOut) {
@@ -193,7 +339,6 @@ async function connect() {
                     'SSH into VM, delete <code>wa_session/</code> and restart <code>kirafx-wa</code> to re-scan QR.'
                 )
             } else {
-                // Debounce: alert at most once every 60s to avoid spam during repeated reconnects
                 const now = Date.now()
                 if (now - _lastDisconnectAlert > 60_000) {
                     _lastDisconnectAlert = now
@@ -215,43 +360,33 @@ async function connect() {
             const isChannel = jid.endsWith('@newsletter')
             const isGroup   = jid.endsWith('@g.us')
 
-            // Must be a channel or group
             if (!isChannel && !isGroup) continue
-
-            // Filter to target source if set
             if (SOURCE_JID && jid !== SOURCE_JID) continue
+            if (!SOURCE_JID && isChannel) log(`Channel message JID: ${jid}`)
 
-            // If SOURCE_JID not set yet, log JID of every channel message to help identify
-            if (!SOURCE_JID && isChannel) {
-                log(`Channel message JID: ${jid}`)
-            }
-
-            const m      = msg.message
-            const text   = m.conversation
-                        || m.extendedTextMessage?.text
-                        || m.imageMessage?.caption
-                        || m.videoMessage?.caption
-                        || m.newsletterAdminInviteMessage?.caption
-                        || ''
-            const sender = msg.pushName || (msg.key.participant || '').split('@')[0] || 'Channel'
-            const tag    = isChannel
-                ? `📢 <b>WA Channel Signal</b>`
-                : `📲 <b>WA · ${sender}</b>`
+            const m    = msg.message
+            const text = (
+                m.conversation
+                || m.extendedTextMessage?.text
+                || m.imageMessage?.caption
+                || m.videoMessage?.caption
+                || ''
+            ).trim()
 
             try {
                 if (m.imageMessage) {
-                    log(`Image from ${isChannel ? 'channel' : sender}${text ? ' + caption' : ''}`)
+                    log(`Image received${text ? ' + caption' : ''}`)
                     const buf = await downloadMediaMessage(
                         msg, 'buffer', {},
                         { logger: pino({ level: 'silent' }), reuploadRequest: sock.updateMediaMessage }
                     )
-                    await tgPhoto(buf, text ? `${tag}\n${text}` : tag)
-                } else if (text.trim()) {
+                    await handleSignal(text, buf)
+                } else if (text) {
                     log(`Text: ${text.slice(0, 80)}`)
-                    await tgText(`${tag}\n${text}`)
+                    await handleSignal(text, null)
                 }
             } catch (e) {
-                log('Forward error:', e.message)
+                log('Handle error:', e.message)
             }
         }
     })
