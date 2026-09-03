@@ -120,13 +120,23 @@ def activate_options_access(inr_amount: int = 5000,
 
 # ── Market data ───────────────────────────────────────────────────────────────
 
-def get_btc_option_instruments(api_key: str = None, api_secret: str = None) -> list:
-    # Bybit returns max 1000 instruments per page — must paginate with cursor
-    # or many contracts (e.g. higher strikes) are silently missing.
+def get_btc_option_instruments(api_key: str = None, api_secret: str = None,
+                               expiry: str = None) -> list:
+    """
+    Fetch BTC option instruments.
+    expiry — Bybit format e.g. '11SEP26'.  When given, filters to that expiry only
+    (response is ~50-100 items, well under the 1000-item page limit).
+    Without expiry the API can return 1000+ contracts so we paginate.
+    """
+    params = {"category": "option", "baseCoin": "BTC", "status": "Trading", "limit": 1000}
+    if expiry:
+        params["expDate"] = expiry  # single-expiry fetch — no pagination needed
+        result = _get("/v5/market/instruments-info", params, api_key, api_secret)
+        return result.get("result", {}).get("list", [])
+    # No expiry filter: paginate until all pages exhausted
     all_instruments: list = []
     cursor: str = ""
     while True:
-        params = {"category": "option", "baseCoin": "BTC", "status": "Trading", "limit": 1000}
         if cursor:
             params["cursor"] = cursor
         result = _get("/v5/market/instruments-info", params, api_key, api_secret)
@@ -215,7 +225,13 @@ def find_option_symbol(strike: int, option_type: str, expiry_hint: str = None,
     side = "P" if option_type.upper() in ("PE", "P") else "C"
     target_expiry = _parse_expiry(expiry_hint)  # e.g. "04SEP26" or None
 
-    instruments = get_btc_option_instruments(api_key, api_secret)
+    # Scope the fetch to the relevant expiry — keeps results well under 1000-item page limit
+    fetch_expiry = target_expiry
+    if not fetch_expiry:
+        cur = _get_current_expiry_date()
+        if cur:
+            fetch_expiry = str(cur.day) + cur.strftime("%b%y").upper()
+    instruments = get_btc_option_instruments(api_key, api_secret, expiry=fetch_expiry)
 
     # Filter by strike and type
     candidates = [
