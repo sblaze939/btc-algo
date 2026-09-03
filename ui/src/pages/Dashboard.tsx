@@ -256,7 +256,7 @@ function MarketIntelPanel({
     <div className="card overflow-hidden" style={{ borderLeft: '2px solid #5BBE72' }}>
 
       {/* Mobile-only stats grid — hidden on sm+ */}
-      <div className="jarvis-mobile-stats grid-cols-2 border-b border-border">
+      <div className="grid grid-cols-2 sm:hidden border-b border-border">
         {stats.map(({ label, value, sub, green, small }, i) => (
           <div key={label} className={[
             'flex flex-col justify-center px-4 py-3',
@@ -272,10 +272,10 @@ function MarketIntelPanel({
         ))}
       </div>
 
-      <div className="jarvis-outer">
+      <div className="flex flex-col sm:grid sm:[grid-template-columns:180px_1fr_200px] sm:min-h-[240px]">
 
         {/* Radar — hidden on mobile */}
-        <div className="jarvis-radar-col border-r border-border flex-col items-center justify-center gap-2.5 px-4 py-5">
+        <div className="hidden sm:flex sm:flex-col border-r border-border items-center justify-center gap-2.5 px-4 py-5">
           <span className="text-[9px] font-mono uppercase tracking-[0.14em] text-muted">Scanner</span>
           <canvas ref={radarRef} width={130} height={130} />
           <div className="flex items-center gap-1.5">
@@ -286,7 +286,7 @@ function MarketIntelPanel({
 
         {/* Center */}
         <div className="flex flex-col border-r border-border">
-          <div className="jarvis-center-cols flex-1 border-b border-border">
+          <div className="flex-1 flex flex-col sm:grid sm:[grid-template-columns:1fr_1fr_130px] border-b border-border">
 
             {/* Volume */}
             <div className="border-r border-border p-3.5 flex flex-col gap-2">
@@ -362,7 +362,7 @@ function MarketIntelPanel({
         </div>
 
         {/* Stats — hidden on mobile */}
-        <div className="jarvis-stats-col flex-col">
+        <div className="hidden sm:flex sm:flex-col">
           {stats.map(({ label, value, sub, green, small }, i) => (
             <div key={label} className={`flex-1 flex flex-col justify-center px-5 ${i < 3 ? 'border-b border-border' : ''}`}>
               <div className="text-[9px] font-mono uppercase tracking-[0.12em] text-muted mb-1">{label}</div>

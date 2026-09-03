@@ -39,20 +39,6 @@ html, body, #root {
   100% { stroke-dashoffset: 46; }
 }
 
-/* MarketIntelPanel — responsive layout */
-.jarvis-outer       { display: flex; flex-direction: column; }
-.jarvis-center-cols { display: flex; flex-direction: column; }
-.jarvis-radar-col   { display: none; }
-.jarvis-stats-col   { display: none; }
-.jarvis-mobile-stats{ display: grid; }
-
-@media (min-width: 640px) {
-  .jarvis-outer        { display: grid; grid-template-columns: 180px 1fr 200px; min-height: 240px; }
-  .jarvis-center-cols  { display: grid; grid-template-columns: 1fr 1fr 130px; }
-  .jarvis-radar-col    { display: flex; }
-  .jarvis-stats-col    { display: flex; }
-  .jarvis-mobile-stats { display: none; }
-}
 
 /* Remove number input spinners */
 input[type='number']::-webkit-inner-spin-button,
