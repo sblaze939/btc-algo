@@ -29,10 +29,12 @@ const fs     = require('fs')
 require('dotenv').config({ path: path.join(__dirname, '.env') })
 
 // WA_SOURCE_JID: JID of the mentor's WA channel or group to monitor
-const SOURCE_JID = (process.env.WA_SOURCE_JID || process.env.WA_GROUP_JID || '').trim()
-const BOT_TOKEN  = process.env.TELEGRAM_BOT_TOKEN  || ''
-const ALERT_CHAT = process.env.TELEGRAM_ALERT_CHAT_ID || ''
-const SESSION    = path.join(__dirname, 'wa_session')
+const SOURCE_JID          = (process.env.WA_SOURCE_JID || process.env.WA_GROUP_JID || '').trim()
+const BOT_TOKEN           = process.env.TELEGRAM_BOT_TOKEN  || ''
+const ALERT_CHAT          = process.env.TELEGRAM_ALERT_CHAT_ID || ''
+const SESSION             = path.join(__dirname, 'wa_session')
+const HEARTBEAT_ID_FILE   = path.join(__dirname, 'logs', 'wa_heartbeat_msg_id')
+const HEARTBEAT_INTERVAL  = 15 * 60 * 1000  // 15 minutes
 
 const ts  = () => new Date().toISOString().replace('T', ' ').slice(0, 19)
 const log = (...a) => console.log(`[${ts()}] [WA Bridge]`, ...a)
@@ -77,7 +79,8 @@ function tgPostPhoto(imgBuffer, caption) {
 
 async function tgText(text) {
     if (!BOT_TOKEN || !ALERT_CHAT) return
-    await tgPost('sendMessage', { chat_id: ALERT_CHAT, text, parse_mode: 'HTML' })
+    const res = await tgPost('sendMessage', { chat_id: ALERT_CHAT, text, parse_mode: 'HTML' })
+    return res?.result?.message_id || null
 }
 
 async function tgPhoto(buffer, caption) {
@@ -85,9 +88,48 @@ async function tgPhoto(buffer, caption) {
     await tgPostPhoto(buffer, caption)
 }
 
+async function tgDelete(messageId) {
+    if (!BOT_TOKEN || !ALERT_CHAT || !messageId) return
+    await tgPost('deleteMessage', { chat_id: ALERT_CHAT, message_id: messageId })
+}
+
+// ── Heartbeat ─────────────────────────────────────────────────────────────────
+
+function loadHeartbeatId() {
+    try { return parseInt(fs.readFileSync(HEARTBEAT_ID_FILE, 'utf8').trim()) || null }
+    catch (_) { return null }
+}
+
+function saveHeartbeatId(id) {
+    try { if (id) fs.writeFileSync(HEARTBEAT_ID_FILE, String(id)) }
+    catch (_) {}
+}
+
+function nowIST() {
+    return new Date().toLocaleString('en-IN', {
+        timeZone: 'Asia/Kolkata', hour: '2-digit', minute: '2-digit', hour12: true
+    }).toUpperCase()
+}
+
+async function sendHeartbeat() {
+    const prevId = loadHeartbeatId()
+    if (prevId) await tgDelete(prevId)
+
+    const sourceName = SOURCE_JID ? 'Option Selling by CR' : '⚠️ Not configured'
+    const newId = await tgText(
+        `🟢 <b>Kirasha Signal Watcher — Active</b>\n\n` +
+        `🕐 ${nowIST()} IST\n` +
+        `📡 Source: ${sourceName}\n` +
+        `📨 Signals forwarding to alerts`
+    )
+    saveHeartbeatId(newId)
+    log('Heartbeat sent')
+}
+
 // ── WhatsApp connection ───────────────────────────────────────────────────────
 
 let _lastDisconnectAlert = 0  // debounce disconnect alerts (max 1 per 60s)
+let _heartbeatTimer      = null
 
 async function connect() {
     fs.mkdirSync(SESSION, { recursive: true })
@@ -121,17 +163,19 @@ async function connect() {
                     }
                 } catch (_) {}
 
-                log('WA_SOURCE_JID not set — listing channels above')
+                log('WA_SOURCE_JID not set — listing channels')
                 await tgText(
-                    '🟢 <b>WA Bridge connected</b>\n\n' +
-                    '⚠️ <b>WA_SOURCE_JID not set</b>\n' +
-                    'Set it in Settings → Current Expiry field is not it — add <code>WA_SOURCE_JID=&lt;jid&gt;</code> to .env and restart.' +
+                    '⚠️ <b>Signal Watcher — Source not configured</b>\n\n' +
+                    'Add <code>WA_SOURCE_JID=&lt;jid&gt;</code> to .env and restart.' +
                     channelLines
                 )
             } else {
                 const type = SOURCE_JID.endsWith('@newsletter') ? 'Channel' : 'Group'
                 log(`Monitoring ${type}: ${SOURCE_JID}`)
-                await tgText(`🟢 <b>WA Bridge connected</b>\nMonitoring ${type}: <code>${SOURCE_JID}</code>`)
+                // Send first heartbeat immediately, then every 15 min
+                await sendHeartbeat()
+                if (_heartbeatTimer) clearInterval(_heartbeatTimer)
+                _heartbeatTimer = setInterval(sendHeartbeat, HEARTBEAT_INTERVAL)
             }
         }
 
@@ -139,11 +183,13 @@ async function connect() {
             const code = lastDisconnect?.error?.output?.statusCode
             log(`Disconnected (code ${code})`)
 
+            if (_heartbeatTimer) { clearInterval(_heartbeatTimer); _heartbeatTimer = null }
+
             if (code === DisconnectReason.loggedOut) {
                 log('Logged out — delete wa_session/ and restart.')
                 await tgText(
-                    '🔴 <b>WA Bridge LOGGED OUT</b>\n' +
-                    'WhatsApp session expired or was removed from another device.\n' +
+                    '🔴 <b>Signal Watcher — Logged Out</b>\n\n' +
+                    'WhatsApp session was removed.\n' +
                     'SSH into VM, delete <code>wa_session/</code> and restart <code>kirafx-wa</code> to re-scan QR.'
                 )
             } else {
@@ -151,7 +197,7 @@ async function connect() {
                 const now = Date.now()
                 if (now - _lastDisconnectAlert > 60_000) {
                     _lastDisconnectAlert = now
-                    await tgText(`⚠️ <b>WA Bridge disconnected</b> (code ${code})\nReconnecting automatically...`)
+                    await tgText(`⚠️ <b>Signal Watcher — Disconnected</b>\nReconnecting automatically...`)
                 }
                 log('Reconnecting in 5s...')
                 setTimeout(connect, 5_000)
