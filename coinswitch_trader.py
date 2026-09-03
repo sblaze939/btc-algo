@@ -222,7 +222,24 @@ def find_option_symbol(strike: int, option_type: str, expiry_hint: str = None,
                 log(f"Symbol (expiry-matched): {exact[0]['symbol']}")
                 return exact[0]["symbol"]
             if strict:
-                log(f"ABORT: No {strike}{option_type} contract for explicit expiry {target_expiry} — refusing nearest fallback")
+                # Exact strike not listed for this expiry.
+                # Try nearest available strike at the SAME expiry (within 10K) before aborting.
+                def _sym_strike(sym: str) -> int:
+                    m2 = re.search(rf"-(\d+)-{side}-", sym)
+                    return int(m2.group(1)) if m2 else 999_999_999
+                same_expiry = sorted(
+                    [c for c in instruments
+                     if _expiry_in_symbol(target_expiry, c["symbol"])
+                     and c["symbol"].endswith(f"-{side}-USDT")],
+                    key=lambda c: abs(_sym_strike(c["symbol"]) - strike)
+                )
+                if same_expiry:
+                    nearest_strike = _sym_strike(same_expiry[0]["symbol"])
+                    delta = abs(nearest_strike - strike)
+                    if delta <= 10_000:
+                        log(f"Strike {strike} not listed for {target_expiry} — using nearest available: {nearest_strike} (delta {delta})")
+                        return same_expiry[0]["symbol"]
+                log(f"ABORT: No {strike}{option_type} contract for explicit expiry {target_expiry} and no usable nearby strike")
                 return None
             # Non-strict explicit: fall through to CURRENT_EXPIRY / nearest
 
