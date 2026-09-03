@@ -119,8 +119,8 @@ async function sendHeartbeat() {
     const newId = await tgText(
         `🟢 <b>Kirasha Signal Watcher — Active</b>\n\n` +
         `🕐 ${nowIST()} IST\n` +
-        `📡 Source: ${sourceName}\n` +
-        `📨 Signals forwarding to alerts`
+        `🔍 Analysing the markets\n` +
+        `⚡ Awaiting signals`
     )
     saveHeartbeatId(newId)
     log('Heartbeat sent')
