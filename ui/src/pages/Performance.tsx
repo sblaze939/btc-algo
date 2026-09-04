@@ -429,7 +429,8 @@ function ShareModal({
 }) {
   const [format, setFormat]       = useState<'square' | 'story'>('square')
   const [downloading, setDL]      = useState(false)
-  const cardRef = useRef<HTMLDivElement>(null)
+  const cardRef    = useRef<HTMLDivElement>(null)  // preview (scaled)
+  const captureRef = useRef<HTMLDivElement>(null)  // full-size off-screen capture target
 
   // Editable gain% — pre-filled from total_pnl / initial_balance (ephemeral, not stored)
   const defaultGain = current && stats.initial_balance
@@ -445,18 +446,29 @@ function ShareModal({
   const previewH = Math.round(cardH * scale)
 
   async function download() {
-    const el = cardRef.current
+    const el = captureRef.current
     if (!el || downloading) return
     setDL(true)
     try {
       await document.fonts.ready
-      const h2c     = (await import('html2canvas')).default
-      const canvas  = await h2c(el, { scale: 2, useCORS: true, logging: false, backgroundColor: null })
-      const today   = new Date().toISOString().slice(0, 10)
-      const a       = document.createElement('a')
-      a.download    = `kirasha-perf-${today}-${format}.png`
-      a.href        = canvas.toDataURL('image/png')
-      a.click()
+      const h2c    = (await import('html2canvas')).default
+      // capture the off-screen full-size card (no CSS transform applied)
+      const canvas = await h2c(el, { scale: 2, useCORS: true, logging: false, backgroundColor: null })
+      const today  = new Date().toISOString().slice(0, 10)
+      const fname  = `kirasha-perf-${today}-${format}.png`
+      canvas.toBlob(blob => {
+        if (!blob) return
+        const url = URL.createObjectURL(blob)
+        const a   = document.createElement('a')
+        a.download = fname
+        a.href     = url
+        document.body.appendChild(a)
+        a.click()
+        document.body.removeChild(a)
+        URL.revokeObjectURL(url)
+      }, 'image/png')
+    } catch (e) {
+      console.error('Download failed:', e)
     } finally {
       setDL(false)
     }
@@ -508,6 +520,13 @@ function ShareModal({
                 overrideLaunchPct={launchPct} />
             </div>
           </div>
+        </div>
+
+        {/* Off-screen full-size card used for html2canvas capture — never visible */}
+        <div style={{ position: 'fixed', left: -9999, top: 0, pointerEvents: 'none', zIndex: -1 }}>
+          <ShareCard entries={entries} stats={stats} current={current} format={format} innerRef={captureRef}
+            overrideGainPct={gainValid ? parsedGain : undefined}
+            overrideLaunchPct={launchPct} />
         </div>
 
         <p className="text-[11px] text-muted font-mono">
