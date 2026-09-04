@@ -1266,7 +1266,7 @@ async def sync_position(req: SyncPositionInput, _=Depends(auth)):
 # ── Weekly Gains ──────────────────────────────────────────────────────────────
 
 GAINS_FILE   = BOT_DIR / "logs" / "weekly_gains.json"
-_LAUNCH_DATE = "2026-08-28"   # first algo expiry; counts toward "since launch" metric
+_LAUNCH_DATE = "2026-09-04"   # first algo expiry; counts toward "since launch" metric
 
 
 def _read_gains_file() -> dict:
@@ -1403,6 +1403,8 @@ def _advance_expiry_if_needed():
     _env_set("CURRENT_EXPIRY", (exp + _td(days=7)).isoformat())
 
 
+_position_flat_since: dict = {}  # expiry_iso -> datetime when positions first observed flat
+
 async def _settlement_watcher():
     """Every 5 min: if current expiry has passed and all positions are flat, auto-write gain entry."""
     await asyncio.sleep(120)
@@ -1464,8 +1466,19 @@ async def _auto_settle_check():
             if bybit_expiry in (p.get("symbol") or "") and _sf(p.get("size", 0)) > 0
         ]
         if open_now:
+            _position_flat_since.pop(target_expiry_iso, None)
             return  # Still open — wait
     except Exception:
+        return
+
+    # Track when positions first went flat; wait 30 min for CoinSwitch PnL to settle
+    import datetime as _dt
+    now_utc = _dt.datetime.now(_dt.timezone.utc)
+    if target_expiry_iso not in _position_flat_since:
+        _position_flat_since[target_expiry_iso] = now_utc
+        return
+    elapsed = (now_utc - _position_flat_since[target_expiry_iso]).total_seconds()
+    if elapsed < 1800:  # 30-min settlement delay — Bybit PnL finalises ~15 min post-expiry
         return
 
     live = _compute_current_expiry_live(expiry_iso=target_expiry_iso)
