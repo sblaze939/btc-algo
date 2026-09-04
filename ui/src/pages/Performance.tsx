@@ -523,7 +523,7 @@ function ShareModal({
 
 // ── Main page ─────────────────────────────────────────────────────────────────
 
-const LAUNCH = '2026-08-28'
+const LAUNCH = '2026-09-04'
 
 export default function Performance() {
   const [data,      setData]      = useState<GainsData | null>(null)
@@ -605,8 +605,8 @@ export default function Performance() {
           <circle cx="7" cy="7" r="6"/><path d="M7 4.5v3l1.5 1" strokeLinecap="round"/>
         </svg>
         <span>
-          <strong>Product launch: Sep 2, 2026.</strong> "Since Sep 2" metric uses the{' '}
-          <strong>Aug 28</strong> expiry as anchor — first algo cycle counts toward launch performance.
+          <strong>Product launch: Sep 2, 2026.</strong> "Since Sep 2" starts from the{' '}
+          <strong>4 Sep</strong> expiry — Aug 28 cycle not included.
         </span>
       </div>
 
@@ -806,6 +806,17 @@ export default function Performance() {
                             ↑
                           </button>
                         )}
+                        <button
+                          onClick={async () => {
+                            if (!window.confirm(`Delete ${fmtDate(e.expiry)} entry?`)) return
+                            await api.gains.remove(e.expiry)
+                            load()
+                          }}
+                          title="Delete entry"
+                          className="opacity-0 group-hover:opacity-100 transition-opacity text-muted hover:text-red text-sm leading-none flex-shrink-0"
+                        >
+                          ×
+                        </button>
                       </div>
                     </td>
                   </tr>
