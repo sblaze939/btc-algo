@@ -71,14 +71,15 @@ function Sparkline({ entries }: { entries: GainEntry[] }) {
 const CARD_W = 540
 
 function ShareCard({
-  entries, stats, current, format, innerRef, overrideGainPct,
+  entries, stats, current, format, innerRef, overrideGainPct, overrideLaunchPct,
 }: {
-  entries:          GainEntry[]
-  stats:            GainsData['stats']
-  current:          CurrentExpiryGain | null
-  format:           'square' | 'story'
-  innerRef?:        React.Ref<HTMLDivElement>
-  overrideGainPct?: number
+  entries:            GainEntry[]
+  stats:              GainsData['stats']
+  current:            CurrentExpiryGain | null
+  format:             'square' | 'story'
+  innerRef?:          React.Ref<HTMLDivElement>
+  overrideGainPct?:   number
+  overrideLaunchPct?: number
 }) {
   const isStory = format === 'story'
   const cardH   = isStory ? 960 : CARD_W
@@ -90,7 +91,7 @@ function ShareCard({
   )
   const isNeg   = curGain < 0
   const allTime = stats.all_time_gain_pct
-  const sinceL  = stats.launch_gain_pct
+  const sinceL  = overrideLaunchPct ?? stats.launch_gain_pct
 
   const MINT  = '#1FCC8C'
   const GOLD  = '#C8A84B'
@@ -418,12 +419,13 @@ function AddModal({ onClose, onAdded }: { onClose: () => void; onAdded: () => vo
 // ── Share Modal ───────────────────────────────────────────────────────────────
 
 function ShareModal({
-  entries, stats, current, onClose,
+  entries, stats, current, onClose, launchPct,
 }: {
-  entries: GainEntry[]
-  stats:   GainsData['stats']
-  current: CurrentExpiryGain | null
-  onClose: () => void
+  entries:    GainEntry[]
+  stats:      GainsData['stats']
+  current:    CurrentExpiryGain | null
+  onClose:    () => void
+  launchPct?: number
 }) {
   const [format, setFormat]       = useState<'square' | 'story'>('square')
   const [downloading, setDL]      = useState(false)
@@ -502,7 +504,8 @@ function ShareModal({
           <div style={{ width: Math.round(CARD_W * scale), height: previewH, overflow: 'hidden', flexShrink: 0 }}>
             <div style={{ transform: `scale(${scale})`, transformOrigin: 'top left', width: CARD_W, flexShrink: 0 }}>
               <ShareCard entries={entries} stats={stats} current={current} format={format} innerRef={cardRef}
-                overrideGainPct={gainValid ? parsedGain : undefined} />
+                overrideGainPct={gainValid ? parsedGain : undefined}
+                overrideLaunchPct={launchPct} />
             </div>
           </div>
         </div>
@@ -569,6 +572,8 @@ export default function Performance() {
       launch: e.expiry >= LAUNCH ? +((launchRun - 1) * 100).toFixed(2) : null,
     }
   }
+  // Client-computed launch gain — same source as table, avoids backend lag
+  const clientLaunchPct = +((launchRun - 1) * 100).toFixed(2)
 
   return (
     <div className="p-5 space-y-4 max-w-5xl">
@@ -859,7 +864,7 @@ export default function Performance() {
                 all_positions_flat: true,
               }
         return (
-          <ShareModal entries={entries} stats={stats} current={shareCurrent} onClose={() => setShareTarget(null)} />
+          <ShareModal entries={entries} stats={stats} current={shareCurrent} onClose={() => setShareTarget(null)} launchPct={clientLaunchPct} />
         )
       })()}
     </div>
