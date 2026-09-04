@@ -527,9 +527,9 @@ function ShareModal({
         </div>
 
 
-        {/* Full-size capture card — rendered behind the modal (z-index -9999), no clip/visibility tricks
-            so the browser fully renders fonts. html2canvas captures its native 540px dimensions. */}
-        <div style={{ position: 'fixed', top: 0, left: 0, zIndex: -9999, pointerEvents: 'none' }}>
+        {/* Full-size capture card — truly off-screen (left:-9999px) so it's invisible but
+            the browser still renders and fonts it. html2canvas captures its native 540px width. */}
+        <div style={{ position: 'fixed', top: 0, left: -9999, pointerEvents: 'none' }}>
           <ShareCard entries={entries} stats={stats} current={current} format={format} innerRef={captureRef}
             overrideGainPct={gainValid ? parsedGain : undefined}
             overrideLaunchPct={launchPct} />
