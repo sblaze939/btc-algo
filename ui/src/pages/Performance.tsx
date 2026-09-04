@@ -672,19 +672,19 @@ export default function Performance() {
 
         <div className="card p-4">
           <div className="text-[10px] uppercase tracking-widest text-muted mb-2.5">Since Sep 2 Launch</div>
-          {stats.launch_gain_pct !== 0 ? (
+          {clientLaunchPct !== 0 ? (
             <>
-              <div className={`font-mono text-3xl font-bold leading-none ${pctClass(stats.launch_gain_pct)}`}>
-                {fmtPct(stats.launch_gain_pct, true)}
+              <div className={`font-mono text-3xl font-bold leading-none ${pctClass(clientLaunchPct)}`}>
+                {fmtPct(clientLaunchPct, true)}
               </div>
               <div className="text-[11px] text-muted mt-2 font-mono">
-                ${stats.initial_balance} → ${stats.current_balance_est.toFixed(0)} USDT est.
+                ${stats.initial_balance} → ${(stats.initial_balance * (1 + clientLaunchPct / 100)).toFixed(0)} USDT est.
               </div>
             </>
           ) : (
             <>
               <div className="font-mono text-2xl font-bold text-accent">Pending</div>
-              <div className="text-[11px] text-muted mt-2 font-mono">First expiry: Aug 28 '26</div>
+              <div className="text-[11px] text-muted mt-2 font-mono">First expiry: Sep 4 '26</div>
             </>
           )}
         </div>
