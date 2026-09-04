@@ -451,6 +451,11 @@ function ShareModal({
     setDL(true)
     try {
       await document.fonts.ready
+      // Ensure Barlow Condensed is loaded before capture
+      await Promise.allSettled([
+        document.fonts.load('700 60px "Barlow Condensed"'),
+        document.fonts.load('800 60px "Barlow Condensed"'),
+      ])
       const h2c    = (await import('html2canvas')).default
       // capture the off-screen full-size card (no CSS transform applied)
       const canvas = await h2c(el, { scale: 2, useCORS: true, logging: false, backgroundColor: null })
