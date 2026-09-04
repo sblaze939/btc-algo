@@ -207,6 +207,15 @@ async def handle_new_message(event):
             await execute_signal_for_all_accounts(signal)
         return
 
+    # ── KirashaAI card (from WA bridge) ─────────────────────────────────────────
+    if msg.text and is_kirasha_card(msg.text):
+        log("KirashaAI card detected")
+        signal = parse_kirasha_card(msg.text)
+        if signal:
+            alert_signal_text([signal], len(ACCOUNTS))
+            await execute_signal_for_all_accounts(signal)
+        return
+
     # ── Text flow ─────────────────────────────────────────────────────────────
     if msg.text and SIGNAL_MODE in ("text", "both"):
         log(f"Text message: {msg.text[:200]}")
@@ -533,3 +542,69 @@ async def main():
 
 if __name__ == "__main__":
     asyncio.run(main())
+
+# ── KirashaAI card parser (Phase 2 — WA bridge) ──────────────────────────────
+
+def is_kirasha_card(text: str) -> bool:
+    return 'KirashaAI · Market Intelligence' in text
+
+
+def parse_kirasha_card(text: str) -> dict | None:
+    """
+    Parse a KirashaAI card posted by wa_bridge.js to the signal channel.
+    Returns a signal dict compatible with execute_signal_for_all_accounts, or None.
+    """
+    # Informational card — no execution
+    if 'No action required' in text:
+        log("KirashaAI card: informational — skip")
+        return None
+
+    # LOW confidence — no execution
+    if '🔴 LOW' in text:
+        log("KirashaAI card: LOW confidence — skip")
+        return None
+
+    # Extract labelled fields
+    action_m   = re.search(r'Action\s*:\s*([^\n—]+)', text)
+    contract_m = re.search(r'Contract\s*:\s*(\d+)\s*(PE|CE)', text, re.IGNORECASE)
+    qty_m      = re.search(r'Quantity\s*:\s*(\d+)', text)
+    expiry_m   = re.search(r'Expiry\s*:\s*([^\n]+)', text)
+
+    if not action_m or not contract_m or not qty_m:
+        log("KirashaAI card: could not parse required fields — skip")
+        return None
+
+    action_str = action_m.group(1).strip().lower()
+    if '—' in action_str or action_str not in ('sell', 'buy'):
+        log(f"KirashaAI card: invalid action '{action_str}' — skip")
+        return None
+
+    strike   = int(contract_m.group(1))
+    opt_type = contract_m.group(2).upper()
+    lots     = int(qty_m.group(1))
+
+    expiry_raw    = expiry_m.group(1).strip() if expiry_m else ''
+    if '—' in expiry_raw or 'using current' in expiry_raw.lower():
+        expiry_date   = None
+        expiry_source = 'unknown'
+    else:
+        expiry_hint   = _extract_expiry_from_text(expiry_raw)
+        expiry_date   = _validate_friday_expiry(expiry_hint) if expiry_hint else None
+        expiry_source = 'explicit' if expiry_date else 'unknown'
+
+    log(f"KirashaAI card: {action_str.upper()} {lots}x {strike} {opt_type} expiry={expiry_date or 'current'}")
+
+    return {
+        'action':        action_str,
+        'strike':        strike,
+        'option_type':   opt_type,
+        'lots':          lots,
+        'expiry_date':   expiry_date,
+        'expiry_source': expiry_source,
+        'full_exit':     False,
+        'close_all':     False,
+        'stop_loss':     None,
+        'target':        None,
+        'confidence':    'high',
+        'raw_text':      text,
+    }

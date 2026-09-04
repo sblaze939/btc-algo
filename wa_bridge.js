@@ -1,16 +1,16 @@
 /**
- * Kirasha BTC Algo — WhatsApp Bridge
- * Phase 1: Monitor signal channel → parse + verify → forward to Telegram alert channel.
+ * Kirasha BTC Algo — WhatsApp Bridge (Phase 2)
+ * Monitors WA signal channel → parses → KirashaAI card → Telegram signal channel.
  *
  * Handles both WhatsApp Groups (@g.us) and WhatsApp Channels (@newsletter).
  * First start: lists all followed channels so you can identify the right JID.
  * Once WA_SOURCE_JID is set in .env: only processes messages from that source.
  *
- * Signal confidence logic:
- *   High confidence text → forward parsed signal directly
- *   Low confidence text + image → cross-verify via Gemini Vision → tag accordingly
- *   Image only → Gemini extracts signal
- *   Info/non-signal text → forward as-is
+ * Signal confidence:
+ *   action + contract + qty (+ expiry) → 🟢 HIGH   — executes with explicit expiry
+ *   action + contract + qty (no expiry) → 🟡 MEDIUM — executes with current expiry
+ *   missing action | contract | qty     → 🔴 LOW    — no execution
+ *   no signal fields                    → ℹ️  info card
  */
 
 const {
@@ -31,6 +31,11 @@ require('dotenv').config({ path: path.join(__dirname, '.env') })
 const SOURCE_JID         = (process.env.WA_SOURCE_JID || process.env.WA_GROUP_JID || '').trim()
 const BOT_TOKEN          = process.env.TELEGRAM_BOT_TOKEN  || ''
 const ALERT_CHAT         = process.env.TELEGRAM_ALERT_CHAT_ID || ''
+// Signal channel: TELEGRAM_CHANNEL_ID is the bare Telethon ID — bot API needs -100 prefix.
+const _rawSigId          = (process.env.TELEGRAM_SIGNAL_CHAT_ID || process.env.TELEGRAM_CHANNEL_ID || '').trim()
+const SIGNAL_CHAT        = _rawSigId
+    ? (_rawSigId.startsWith('-') ? _rawSigId : `-100${_rawSigId}`)
+    : ''
 const GEMINI_KEY         = process.env.GEMINI_API_KEY || ''
 const SESSION            = path.join(__dirname, 'wa_session')
 const HEARTBEAT_ID_FILE  = path.join(__dirname, 'logs', 'wa_heartbeat_msg_id')
@@ -56,11 +61,11 @@ function tgPost(method, body) {
     })
 }
 
-function tgPostPhoto(imgBuffer, caption) {
+function tgPostPhoto(imgBuffer, caption, chatId = ALERT_CHAT) {
     return new Promise((resolve) => {
         const boundary = 'WaBridge' + Date.now()
         const meta = Buffer.from([
-            `--${boundary}\r\nContent-Disposition: form-data; name="chat_id"\r\n\r\n${ALERT_CHAT}\r\n`,
+            `--${boundary}\r\nContent-Disposition: form-data; name="chat_id"\r\n\r\n${chatId}\r\n`,
             `--${boundary}\r\nContent-Disposition: form-data; name="caption"\r\n\r\n${caption}\r\n`,
             `--${boundary}\r\nContent-Disposition: form-data; name="photo"; filename="signal.jpg"\r\nContent-Type: image/jpeg\r\n\r\n`,
         ].join(''))
@@ -77,17 +82,17 @@ function tgPostPhoto(imgBuffer, caption) {
     })
 }
 
-async function tgText(text, html = true) {
-    if (!BOT_TOKEN || !ALERT_CHAT) return null
-    const body = { chat_id: ALERT_CHAT, text }
+async function tgText(text, html = true, chatId = ALERT_CHAT) {
+    if (!BOT_TOKEN || !chatId) return null
+    const body = { chat_id: chatId, text }
     if (html) body.parse_mode = 'HTML'
     const res = await tgPost('sendMessage', body)
     return res?.result?.message_id || null
 }
 
-async function tgPhoto(buffer, caption) {
-    if (!BOT_TOKEN || !ALERT_CHAT) return
-    await tgPostPhoto(buffer, caption)
+async function tgPhoto(buffer, caption, chatId = ALERT_CHAT) {
+    if (!BOT_TOKEN || !chatId) return
+    await tgPostPhoto(buffer, caption, chatId)
 }
 
 async function tgDelete(messageId) {
@@ -140,10 +145,10 @@ function parseSignalText(text) {
     if (INFO_KEYWORDS.some(k => t.includes(k))) return { confidence: 'none', raw: text }
 
     let action = null
-    if (/\b(sell|short|add)\b/.test(t))              action = 'sell'
+    if (/\b(sell|short|add)\b/.test(t))               action = 'sell'
     else if (/\b(buy|long|close|exit|book)\b/.test(t)) action = 'buy'
 
-    const lotsMatch = t.match(/(\d+)\s*(?:more\s+)?lots?/)
+    const lotsMatch = t.match(/(\d+)\s*(?:more\s+)?(?:lots?|x\b)/)
     const lots = lotsMatch ? parseInt(lotsMatch[1]) : null
 
     const strikeMatch = t.match(/(\d+(?:\.\d+)?)\s*k\b/i) || t.match(/\b(\d{4,6})\b/)
@@ -163,6 +168,78 @@ function parseSignalText(text) {
     return { action, lots, strike, optionType, confidence, raw: text }
 }
 
+// ── Expiry extraction ─────────────────────────────────────────────────────────
+
+const MONTH_MAP = {
+    jan: 'Jan', january: 'Jan', feb: 'Feb', february: 'Feb',
+    mar: 'Mar', march: 'Mar', apr: 'Apr', april: 'Apr', may: 'May',
+    jun: 'Jun', june: 'Jun', jul: 'Jul', july: 'Jul',
+    aug: 'Aug', august: 'Aug', sep: 'Sep', sept: 'Sep', september: 'Sep',
+    oct: 'Oct', october: 'Oct', nov: 'Nov', november: 'Nov',
+    dec: 'Dec', december: 'Dec',
+}
+
+function extractExpiry(text) {
+    const t = text.toLowerCase()
+    for (const [key, val] of Object.entries(MONTH_MAP)) {
+        // "11 sep", "11th sep", "11 sep 2026" — \b prevents "sep" matching inside "september"
+        let m = t.match(new RegExp(`(\\d{1,2})(?:st|nd|rd|th)?\\s+${key}\\b(?:\\s+(\\d{4}))?`))
+        if (m) return m[2] ? `${m[1]} ${val} ${m[2]}` : `${m[1]} ${val}`
+        // "sep 11", "sep 11 2026"
+        m = t.match(new RegExp(`\\b${key}\\s+(\\d{1,2})(?:st|nd|rd|th)?(?:\\s+(\\d{4}))?`))
+        if (m) return m[2] ? `${m[1]} ${val} ${m[2]}` : `${m[1]} ${val}`
+    }
+    return null
+}
+
+// ── Card formatting ───────────────────────────────────────────────────────────
+
+const SEP = '━━━━━━━━━━━━━━━━━━━━━'
+
+function buildCard(action, strike, optionType, lots, expiry) {
+    const hasAction   = !!action
+    const hasContract = !!(strike && optionType)
+    const hasQty      = !!lots
+
+    const actionStr   = hasAction   ? action.toUpperCase()      : '—'
+    const contractStr = hasContract ? `${strike} ${optionType}` : '—'
+    const qtyStr      = hasQty      ? `${lots} lots`            : '—'
+    const expiryStr   = expiry      ? expiry                    : '— (using current)'
+
+    let header, footer
+    if (hasAction && hasContract && hasQty) {
+        header = '🤖 KirashaAI · Market Intelligence'
+        footer = expiry ? '🟢 HIGH CONFIDENCE' : '🟡 MEDIUM CONFIDENCE'
+    } else {
+        header = '🤖 KirashaAI · Market Intelligence'
+        footer = '🔴 LOW · No execution'
+    }
+
+    return [header, SEP,
+        `Action    : ${actionStr}`,
+        `Contract  : ${contractStr}`,
+        `Quantity  : ${qtyStr}`,
+        `Expiry    : ${expiryStr}`,
+    SEP, footer].join('\n')
+}
+
+function buildInfoCard(text) {
+    return ['ℹ️ KirashaAI · Market Update', SEP, text, SEP, '📢 No action required'].join('\n')
+}
+
+function processText(text) {
+    const parsed = parseSignalText(text)
+    const expiry = extractExpiry(text)
+    if (parsed.confidence === 'none') {
+        log('Non-signal → info card')
+        return buildInfoCard(text)
+    }
+    log(`Signal → card: action=${parsed.action} strike=${parsed.strike} type=${parsed.optionType} lots=${parsed.lots} expiry=${expiry} confidence=${parsed.confidence}`)
+    return buildCard(parsed.action, parsed.strike, parsed.optionType, parsed.lots, expiry)
+}
+
+// ── Legacy (Phase 1) — kept, not called ──────────────────────────────────────
+
 function formatSignal(p) {
     const action = p.action ? (p.action[0].toUpperCase() + p.action.slice(1)) : '?'
     const lots   = p.lots   || '?'
@@ -170,8 +247,6 @@ function formatSignal(p) {
     const type   = p.optionType || '?'
     return `${action} ${lots} × ${strike} ${type}`
 }
-
-// ── Gemini Vision ─────────────────────────────────────────────────────────────
 
 let _gemini = null
 function geminiModel() {
@@ -212,69 +287,9 @@ async function extractFromImage(imageBuffer) {
     return { action: data.action, lots: data.lots, strike: data.strike, optionType: data.option_type }
 }
 
-// ── Signal handler ────────────────────────────────────────────────────────────
-
 async function handleSignal(text, imageBuffer) {
-    if (!text && !imageBuffer) return
-
-    // Image only — extract via Gemini
-    if (!text && imageBuffer) {
-        log('Image only — Gemini extraction')
-        try {
-            const extracted = await extractFromImage(imageBuffer)
-            const caption = extracted
-                ? `🔍 ${formatSignal(extracted)}\nSource: Image analysis`
-                : ''
-            await tgPhoto(imageBuffer, caption)
-        } catch (e) {
-            log('Gemini extraction error:', e.message)
-            await tgPhoto(imageBuffer, '')
-        }
-        return
-    }
-
-    const parsed = parseSignalText(text)
-    log(`Parsed: confidence=${parsed.confidence} signal=${formatSignal(parsed)}`)
-
-    // Not a signal — forward as-is (image+caption if available, else raw text)
-    if (parsed.confidence === 'none') {
-        if (imageBuffer) await tgPhoto(imageBuffer, text)
-        else             await tgText(text, false)
-        return
-    }
-
-    const signal = formatSignal(parsed)
-
-    // High confidence
-    if (parsed.confidence === 'high') {
-        const caption = `✅ ${signal}\nConfidence: High`
-        if (imageBuffer) await tgPhoto(imageBuffer, caption)
-        else             await tgText(caption, false)
-        return
-    }
-
-    // Low confidence, no image
-    if (!imageBuffer) {
-        await tgText(`⚠️ ${signal}\nConfidence: Low (no image to verify)`, false)
-        return
-    }
-
-    // Low confidence + image → cross-verify
-    log('Low confidence — cross-verifying with Gemini')
-    try {
-        const verify = await verifyWithGemini(imageBuffer, parsed)
-        if (verify.match_found) {
-            await tgPhoto(imageBuffer, `🔍 ${signal}\nConfidence: Low → Image confirmed ✓`)
-        } else {
-            const imgDetail = [verify.image_strike, verify.image_type].filter(Boolean).join(' ') || 'unclear'
-            const textDetail = `${parsed.strike ? parsed.strike / 1000 + 'K' : '?'} ${parsed.optionType || '?'}`
-            await tgPhoto(imageBuffer,
-                `⚠️ Signal conflict\nText: ${textDetail} · Image: ${imgDetail}\nManual review needed`)
-        }
-    } catch (e) {
-        log('Gemini verify error:', e.message)
-        await tgPhoto(imageBuffer, `🔍 ${signal}\nConfidence: Low (image verify failed)`)
-    }
+    // Phase 1 handler — superseded by processText() + buildCard()
+    void text; void imageBuffer
 }
 
 // ── WhatsApp connection ───────────────────────────────────────────────────────
@@ -290,7 +305,7 @@ async function connect() {
         auth:                state,
         logger:              pino({ level: 'silent' }),
         keepAliveIntervalMs: 30_000,
-        markOnlineOnConnect: false,   // don't appear "active" so phone keeps getting notifications
+        markOnlineOnConnect: false,
     })
 
     sock.ev.on('creds.update', saveCreds)
@@ -303,6 +318,7 @@ async function connect() {
 
         if (connection === 'open') {
             log('Connected to WhatsApp ✓')
+            log(`Signal channel: ${SIGNAL_CHAT || '(not configured)'}`)
 
             if (!SOURCE_JID) {
                 let channelLines = ''
@@ -375,26 +391,32 @@ async function connect() {
                 || ''
             ).trim()
 
+            if (!SIGNAL_CHAT) {
+                log('WARNING: SIGNAL_CHAT not configured — message dropped. Set TELEGRAM_CHANNEL_ID in .env')
+                continue
+            }
+
             try {
                 if (m.imageMessage) {
-                    log(`Image received${text ? ' + caption' : ''} — forwarding as-is`)
-                    let imgBuf = null
+                    log(`Image received${text ? ' + caption' : ''}`)
+                    // WA Channel posts don't carry media key — download always fails for newsletters.
                     try {
-                        imgBuf = await downloadMediaMessage(
-                            msg, 'buffer', {},
-                            { logger: pino({ level: 'silent' }), reuploadRequest: sock.updateMediaMessage }
-                        )
+                        await downloadMediaMessage(msg, 'buffer', {},
+                            { logger: pino({ level: 'silent' }), reuploadRequest: sock.updateMediaMessage })
                     } catch (_) {
-                        // WA Channel posts don't carry the media key — image download always
-                        // fails for newsletter messages. Caption forwarded as plain text below.
-                        log('Media download failed (channel restriction) — caption forwarded as text')
+                        log('Media download failed (channel restriction)')
                     }
-                    if (imgBuf && text) await tgPhoto(imgBuf, text)
-                    else if (imgBuf)    await tgPhoto(imgBuf, '')
-                    else if (text)      await tgText(text, false)
+                    // Process caption as signal regardless of image availability
+                    if (text) {
+                        const card = processText(text)
+                        await tgText(card, false, SIGNAL_CHAT)
+                    } else {
+                        await tgText(buildInfoCard('[Image received — no caption]'), false, SIGNAL_CHAT)
+                    }
                 } else if (text) {
-                    log(`Text — forwarding: ${text.slice(0, 80)}`)
-                    await tgText(text, false)
+                    log(`Text — processing: ${text.slice(0, 80)}`)
+                    const card = processText(text)
+                    await tgText(card, false, SIGNAL_CHAT)
                 }
             } catch (e) {
                 log('Handle error:', e.message)
