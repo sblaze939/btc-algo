@@ -243,11 +243,11 @@ function ShareCard({
           </div>
         </div>
 
-        {/* Current Expiry + Since Sep 2 */}
+        {/* This Week + Since Sep 2 */}
         <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr',
           flexShrink: 0, borderBottom: `1px solid ${LINE}` }}>
           {[
-            { label: 'Current Expiry', val: fmtG(curGain), color: curC },
+            { label: 'This Week', val: fmtG(curGain), color: curC },
             { label: 'Since Sep 2',    val: fmtG(sinceL),  color: sinceL >= 0 ? MINT : RED, right: true },
           ].map(col => (
             <div key={col.label} style={{
@@ -630,7 +630,7 @@ export default function Performance() {
 
         <div className="card p-4">
           <div className="flex items-center gap-2 mb-2.5">
-            <span className="text-[10px] uppercase tracking-widest text-muted">Current Expiry</span>
+            <span className="text-[10px] uppercase tracking-widest text-muted">This Week</span>
             {cur?.is_live && (
               <span className="flex items-center gap-1 text-[10px] font-semibold text-green-live">
                 <span className="w-1.5 h-1.5 rounded-full bg-green-live inline-block" />
