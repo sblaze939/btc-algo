@@ -237,8 +237,7 @@ function ShareCard({
           </span>
           <div style={{ fontFamily: "'Barlow Condensed', sans-serif",
             fontSize: isStory ? 108 : 84, fontWeight: 800,
-            lineHeight: 0.88, letterSpacing: '-0.02em', color: MINT,
-            fontVariantNumeric: 'tabular-nums' }}>
+            lineHeight: 0.88, letterSpacing: '-0.02em', color: MINT }}>
             {fmtB(allTime)}
           </div>
         </div>
@@ -260,7 +259,7 @@ function ShareCard({
               <span style={{ fontFamily: "'Barlow Condensed', sans-serif",
                 fontSize: isStory ? 40 : 30, fontWeight: 800,
                 color: col.color, display: 'block', lineHeight: 1,
-                fontVariantNumeric: 'tabular-nums' }}>{col.val}</span>
+                }}>{col.val}</span>
             </div>
           ))}
         </div>
@@ -308,7 +307,7 @@ function ShareCard({
               <span style={{ fontFamily: "'Barlow Condensed', sans-serif",
                 fontSize: isStory ? 52 : 38, fontWeight: 800,
                 color: st.color, display: 'block', lineHeight: 1,
-                fontVariantNumeric: 'tabular-nums' }}>{st.val}</span>
+                }}>{st.val}</span>
             </div>
           ))}
         </div>
@@ -527,11 +526,14 @@ function ShareModal({
           </div>
         </div>
 
-        {/* Off-screen full-size card used for html2canvas capture — never visible */}
-        <div style={{ position: 'fixed', left: -9999, top: 0, pointerEvents: 'none', zIndex: -1 }}>
-          <ShareCard entries={entries} stats={stats} current={current} format={format} innerRef={captureRef}
-            overrideGainPct={gainValid ? parsedGain : undefined}
-            overrideLaunchPct={launchPct} />
+        {/* Hidden full-size card for html2canvas capture — clipped to 0 size, visibility:hidden
+            ensures the browser renders it (including fonts) without showing it */}
+        <div style={{ position: 'fixed', top: 0, left: 0, width: 0, height: 0, overflow: 'hidden', zIndex: -1 }}>
+          <div style={{ visibility: 'hidden' }}>
+            <ShareCard entries={entries} stats={stats} current={current} format={format} innerRef={captureRef}
+              overrideGainPct={gainValid ? parsedGain : undefined}
+              overrideLaunchPct={launchPct} />
+          </div>
         </div>
 
         <p className="text-[11px] text-muted font-mono">
