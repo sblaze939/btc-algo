@@ -428,8 +428,7 @@ function ShareModal({
 }) {
   const [format, setFormat]       = useState<'square' | 'story'>('square')
   const [downloading, setDL]      = useState(false)
-  const cardRef    = useRef<HTMLDivElement>(null)  // preview (scaled)
-  const captureRef = useRef<HTMLDivElement>(null)  // full-size off-screen capture target
+  const cardRef = useRef<HTMLDivElement>(null)
 
   // Editable gain% — pre-filled from total_pnl / initial_balance (ephemeral, not stored)
   const defaultGain = current && stats.initial_balance
@@ -445,7 +444,7 @@ function ShareModal({
   const previewH = Math.round(cardH * scale)
 
   async function download() {
-    const el = captureRef.current
+    const el = cardRef.current
     if (!el || downloading) return
     setDL(true)
     try {
@@ -526,15 +525,6 @@ function ShareModal({
           </div>
         </div>
 
-        {/* Hidden full-size card for html2canvas capture — clipped to 0 size, visibility:hidden
-            ensures the browser renders it (including fonts) without showing it */}
-        <div style={{ position: 'fixed', top: 0, left: 0, width: 0, height: 0, overflow: 'hidden', zIndex: -1 }}>
-          <div style={{ visibility: 'hidden' }}>
-            <ShareCard entries={entries} stats={stats} current={current} format={format} innerRef={captureRef}
-              overrideGainPct={gainValid ? parsedGain : undefined}
-              overrideLaunchPct={launchPct} />
-          </div>
-        </div>
 
         <p className="text-[11px] text-muted font-mono">
           {isStory ? 'Story 9:16 — exports 1080×1920 PNG' : 'Square — exports 1080×1080 PNG'}
